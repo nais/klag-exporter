@@ -6,6 +6,7 @@ use crate::error::Result;
 use crate::kafka::client::{KafkaClient, TopicPartition};
 use crate::kafka::TimestampConsumer;
 use crate::metrics::registry::MetricsRegistry;
+use futures::future::join_all;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -231,7 +232,7 @@ impl ClusterManager {
         sampler: &TimestampSampler,
         snapshot: &crate::collector::offset_collector::OffsetsSnapshot,
     ) -> HashMap<(String, TopicPartition), i64> {
-        // Build list of requests
+        // Build list of requests for partitions with lag
         let mut requests: Vec<(String, TopicPartition, i64)> = Vec::new();
 
         for group in &snapshot.groups {
@@ -253,37 +254,40 @@ impl ClusterManager {
             cluster = %self.cluster_name,
             request_count = requests.len(),
             max_concurrent = self.max_concurrent_fetches,
-            "Fetching timestamps concurrently"
+            "Fetching timestamps in parallel"
         );
 
         // Use semaphore to limit concurrency
         let semaphore = Arc::new(Semaphore::new(self.max_concurrent_fetches));
         let mut handles = Vec::with_capacity(requests.len());
 
+        // Spawn all tasks in parallel
         for (group_id, tp, offset) in requests {
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
-            let sampler_ref = sampler;
-            let group_id_clone = group_id.clone();
-            let tp_clone = tp.clone();
+            let permit = semaphore.clone();
+            let sampler_clone = sampler.clone();
 
-            // Use block_in_place for synchronous Kafka operations
-            let result = tokio::task::block_in_place(|| {
-                let res = sampler_ref.get_timestamp(&group_id_clone, &tp_clone, offset);
-                drop(permit);
-                res
+            // Spawn a blocking task for each timestamp fetch
+            let handle = tokio::task::spawn_blocking(move || {
+                // Acquire permit inside the blocking task to limit concurrency
+                let _permit = permit.try_acquire();
+                let result = sampler_clone.get_timestamp(&group_id, &tp, offset);
+                ((group_id, tp), result)
             });
 
-            handles.push(((group_id, tp), result));
+            handles.push(handle);
         }
+
+        // Wait for all tasks to complete in parallel
+        let results = join_all(handles).await;
 
         // Collect results
         let mut timestamps = HashMap::new();
-        for ((group_id, tp), result) in handles {
+        for result in results {
             match result {
-                Ok(Some(ts)) => {
+                Ok(((group_id, tp), Ok(Some(ts)))) => {
                     timestamps.insert((group_id, tp), ts);
                 }
-                Ok(None) => {
+                Ok(((group_id, tp), Ok(None))) => {
                     debug!(
                         group = group_id,
                         topic = tp.topic,
@@ -291,7 +295,7 @@ impl ClusterManager {
                         "No timestamp available"
                     );
                 }
-                Err(e) => {
+                Ok(((group_id, tp), Err(e))) => {
                     warn!(
                         group = group_id,
                         topic = tp.topic,
@@ -299,6 +303,9 @@ impl ClusterManager {
                         error = %e,
                         "Failed to fetch timestamp"
                     );
+                }
+                Err(e) => {
+                    warn!(error = %e, "Timestamp fetch task panicked");
                 }
             }
         }

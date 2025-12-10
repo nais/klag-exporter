@@ -13,18 +13,27 @@ struct CachedTimestamp {
     cached_at: Instant,
 }
 
-pub struct TimestampSampler {
-    consumer: Arc<TimestampConsumer>,
+/// Inner struct holding the actual sampler state
+struct TimestampSamplerInner {
+    consumer: TimestampConsumer,
     cache: DashMap<(String, TopicPartition), CachedTimestamp>,
     cache_ttl: Duration,
+}
+
+/// Thread-safe, clonable timestamp sampler for concurrent fetching
+#[derive(Clone)]
+pub struct TimestampSampler {
+    inner: Arc<TimestampSamplerInner>,
 }
 
 impl TimestampSampler {
     pub fn new(consumer: TimestampConsumer, cache_ttl: Duration) -> Self {
         Self {
-            consumer: Arc::new(consumer),
-            cache: DashMap::new(),
-            cache_ttl,
+            inner: Arc::new(TimestampSamplerInner {
+                consumer,
+                cache: DashMap::new(),
+                cache_ttl,
+            }),
         }
     }
 
@@ -38,11 +47,11 @@ impl TimestampSampler {
         let key = (group_id.to_string(), tp.clone());
 
         // Check cache
-        if let Some(cached) = self.cache.get(&key) {
+        if let Some(cached) = self.inner.cache.get(&key) {
             // Cache is valid if:
             // 1. Not expired by TTL
             // 2. Offset hasn't changed (consumer hasn't moved)
-            if cached.cached_at.elapsed() < self.cache_ttl && cached.offset == offset {
+            if cached.cached_at.elapsed() < self.inner.cache_ttl && cached.offset == offset {
                 debug!(
                     cached_timestamp = cached.timestamp_ms,
                     "Using cached timestamp"
@@ -52,11 +61,11 @@ impl TimestampSampler {
         }
 
         // Fetch from Kafka
-        let timestamp = self.consumer.fetch_timestamp(tp, offset)?;
+        let timestamp = self.inner.consumer.fetch_timestamp(tp, offset)?;
 
         // Cache the result
         if let Some(ts) = timestamp {
-            self.cache.insert(
+            self.inner.cache.insert(
                 key,
                 CachedTimestamp {
                     timestamp_ms: ts,
@@ -86,24 +95,26 @@ impl TimestampSampler {
 
     pub fn clear_stale_entries(&self) {
         let now = Instant::now();
-        self.cache.retain(|_, v| now.duration_since(v.cached_at) < self.cache_ttl);
+        self.inner
+            .cache
+            .retain(|_, v| now.duration_since(v.cached_at) < self.inner.cache_ttl);
     }
 
     pub fn cache_size(&self) -> usize {
-        self.cache.len()
+        self.inner.cache.len()
     }
 
     #[allow(dead_code)]
     pub fn clear_cache(&self) {
-        self.cache.clear();
+        self.inner.cache.clear();
     }
 }
 
 impl std::fmt::Debug for TimestampSampler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TimestampSampler")
-            .field("cache_size", &self.cache.len())
-            .field("cache_ttl", &self.cache_ttl)
+            .field("cache_size", &self.inner.cache.len())
+            .field("cache_ttl", &self.inner.cache_ttl)
             .finish()
     }
 }
