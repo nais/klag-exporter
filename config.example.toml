@@ -1,0 +1,86 @@
+# Kafka Lag Exporter Configuration
+# Copy this file to config.toml and adjust as needed
+
+[exporter]
+# How often to poll Kafka for offsets (default: 30s)
+poll_interval = "30s"
+
+# HTTP server settings for Prometheus endpoint
+http_port = 8000
+http_host = "0.0.0.0"
+
+# Metric granularity: "topic" (default) or "partition"
+# "topic" aggregates per-topic, "partition" includes partition-level metrics
+granularity = "topic"
+
+[exporter.timestamp_sampling]
+# Enable time lag calculation via message timestamp fetching
+enabled = true
+
+# Cache timestamp for this duration to avoid excessive Kafka reads
+cache_ttl = "60s"
+
+# Maximum concurrent timestamp fetch operations
+max_concurrent_fetches = 10
+
+[exporter.otel]
+# Enable OpenTelemetry export (default: false)
+enabled = false
+
+# OTLP endpoint (gRPC)
+endpoint = "http://localhost:4317"
+
+# How often to push metrics to OTLP
+export_interval = "60s"
+
+# Kafka cluster configuration
+# You can define multiple [[clusters]] sections for multi-cluster monitoring
+
+[[clusters]]
+# Unique name for this cluster (used in metric labels)
+name = "production"
+
+# Kafka bootstrap servers (comma-separated)
+bootstrap_servers = "kafka1:9092,kafka2:9092,kafka3:9092"
+
+# Consumer group filters (regex patterns)
+# Groups matching whitelist AND not matching blacklist will be monitored
+group_whitelist = [".*"]
+group_blacklist = []
+
+# Topic filters (regex patterns)
+topic_whitelist = [".*"]
+topic_blacklist = ["^__.*"]  # Exclude internal topics like __consumer_offsets
+
+# Additional Kafka consumer properties
+# Use ${ENV_VAR} syntax for environment variable substitution
+[clusters.consumer_properties]
+# Uncomment and configure for SASL authentication:
+# "security.protocol" = "SASL_SSL"
+# "sasl.mechanism" = "PLAIN"
+# "sasl.username" = "${KAFKA_USER}"
+# "sasl.password" = "${KAFKA_PASSWORD}"
+
+# Uncomment for SSL/TLS:
+# "ssl.ca.location" = "/path/to/ca.pem"
+# "ssl.certificate.location" = "/path/to/client.pem"
+# "ssl.key.location" = "/path/to/client.key"
+
+# Custom labels added to all metrics for this cluster
+[clusters.labels]
+environment = "production"
+# datacenter = "us-east-1"
+
+# Example: Second cluster configuration
+# [[clusters]]
+# name = "staging"
+# bootstrap_servers = "kafka-staging:9092"
+# group_whitelist = ["^staging-.*"]
+# group_blacklist = []
+# topic_whitelist = [".*"]
+# topic_blacklist = ["^__.*"]
+#
+# [clusters.consumer_properties]
+#
+# [clusters.labels]
+# environment = "staging"
