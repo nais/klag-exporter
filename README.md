@@ -9,6 +9,10 @@
 
 A high-performance Apache Kafka® consumer group lag exporter written in Rust. Calculates both **offset lag** and **time lag** (latency in seconds) with accurate timestamp-based measurements.
 
+<p align="center">
+  <img src="docs/images/grafana-dashboard.png" alt="Grafana Dashboard" width="800">
+</p>
+
 ## Features
 
 - **Accurate Time Lag Calculation** — Directly reads message timestamps from Kafka® partitions instead of interpolating from lookup tables
