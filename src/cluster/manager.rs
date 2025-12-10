@@ -12,6 +12,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Semaphore};
 use tracing::{debug, error, info, instrument, warn};
 
+/// Default timeout for a single collection cycle (should be less than poll_interval)
+const DEFAULT_COLLECTION_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub struct ClusterManager {
     cluster_name: String,
     cluster_labels: HashMap<String, String>,
@@ -23,6 +26,7 @@ pub struct ClusterManager {
     granularity: Granularity,
     max_concurrent_fetches: usize,
     cache_cleanup_interval: Duration,
+    collection_timeout: Duration,
 }
 
 impl ClusterManager {
@@ -58,6 +62,13 @@ impl ClusterManager {
             "Created cluster manager"
         );
 
+        // Collection timeout should be less than poll_interval to avoid overlap
+        let collection_timeout = if exporter_config.poll_interval > Duration::from_secs(10) {
+            exporter_config.poll_interval - Duration::from_secs(5)
+        } else {
+            DEFAULT_COLLECTION_TIMEOUT.min(exporter_config.poll_interval)
+        };
+
         Ok(Self {
             cluster_name,
             cluster_labels,
@@ -69,6 +80,7 @@ impl ClusterManager {
             granularity: exporter_config.granularity,
             max_concurrent_fetches: exporter_config.timestamp_sampling.max_concurrent_fetches,
             cache_cleanup_interval: exporter_config.timestamp_sampling.cache_ttl * 2,
+            collection_timeout,
         })
     }
 
@@ -84,13 +96,19 @@ impl ClusterManager {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    match self.collect_once().await {
-                        Ok(()) => {
+                    // Wrap collect_once with a timeout to prevent hangs
+                    let collection_result = tokio::time::timeout(
+                        self.collection_timeout,
+                        self.collect_once()
+                    ).await;
+
+                    match collection_result {
+                        Ok(Ok(())) => {
                             consecutive_errors = 0;
                             current_backoff = Duration::from_secs(1);
                             self.registry.set_healthy(true);
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             consecutive_errors += 1;
                             error!(
                                 cluster = %self.cluster_name,
@@ -111,6 +129,19 @@ impl ClusterManager {
 
                                 tokio::time::sleep(backoff).await;
                                 current_backoff = (current_backoff * 2).min(self.max_backoff);
+                            }
+                        }
+                        Err(_timeout) => {
+                            consecutive_errors += 1;
+                            error!(
+                                cluster = %self.cluster_name,
+                                timeout_secs = self.collection_timeout.as_secs(),
+                                consecutive_errors = consecutive_errors,
+                                "Collection timed out"
+                            );
+
+                            if consecutive_errors >= 3 {
+                                self.registry.set_healthy(false);
                             }
                         }
                     }

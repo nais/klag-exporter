@@ -82,7 +82,7 @@ impl LagCalculator {
         // Process each consumer group
         for group in &snapshot.groups {
             let mut group_max_lag: i64 = 0;
-            let mut group_max_lag_seconds: Option<f64> = None;
+            let mut group_max_lag_seconds: Option<f64> = Some(0.0); // Always emit, default to 0
             let mut group_sum_lag: i64 = 0;
             let mut topic_lags: HashMap<String, i64> = HashMap::new();
 

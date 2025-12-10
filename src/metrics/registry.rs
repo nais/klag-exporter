@@ -5,22 +5,33 @@ use crate::metrics::types::{Labels, MetricPoint, OtelDataPoint, OtelMetric};
 use dashmap::DashMap;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Default staleness threshold: 3x the typical poll interval
+const DEFAULT_STALENESS_THRESHOLD: Duration = Duration::from_secs(90);
 
 pub struct MetricsRegistry {
     metrics: DashMap<String, Vec<MetricPoint>>,
     last_update: DashMap<String, Instant>,
+    last_update_timestamp: DashMap<String, u64>, // Unix timestamp in seconds
     healthy: AtomicBool,
     last_scrape_duration_ms: AtomicU64,
+    staleness_threshold: Duration,
 }
 
 impl MetricsRegistry {
     pub fn new() -> Self {
+        Self::with_staleness_threshold(DEFAULT_STALENESS_THRESHOLD)
+    }
+
+    pub fn with_staleness_threshold(staleness_threshold: Duration) -> Self {
         Self {
             metrics: DashMap::new(),
             last_update: DashMap::new(),
+            last_update_timestamp: DashMap::new(),
             healthy: AtomicBool::new(true),
             last_scrape_duration_ms: AtomicU64::new(0),
+            staleness_threshold,
         }
     }
 
@@ -172,9 +183,16 @@ impl MetricsRegistry {
             HELP_POLL_TIME_MS,
         ));
 
-        // Store metrics
+        // Store metrics and update timestamps
+        let now = Instant::now();
+        let unix_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
         self.metrics.insert(cluster.to_string(), points);
-        self.last_update.insert(cluster.to_string(), Instant::now());
+        self.last_update.insert(cluster.to_string(), now);
+        self.last_update_timestamp.insert(cluster.to_string(), unix_timestamp);
     }
 
     pub fn set_healthy(&self, healthy: bool) {
@@ -193,14 +211,53 @@ impl MetricsRegistry {
         self.last_scrape_duration_ms.load(Ordering::SeqCst) as f64 / 1000.0
     }
 
+    /// Check if any cluster's data is stale (older than staleness_threshold)
+    #[allow(dead_code)]
+    pub fn is_data_stale(&self) -> bool {
+        let now = Instant::now();
+        for entry in self.last_update.iter() {
+            if now.duration_since(*entry.value()) > self.staleness_threshold {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get the age of the oldest data across all clusters
+    #[allow(dead_code)]
+    pub fn get_max_data_age(&self) -> Option<Duration> {
+        let now = Instant::now();
+        self.last_update
+            .iter()
+            .map(|entry| now.duration_since(*entry.value()))
+            .max()
+    }
+
     pub fn render_prometheus(&self) -> String {
+        self.render_prometheus_with_staleness_check(true)
+    }
+
+    /// Render Prometheus metrics, optionally filtering out stale clusters
+    pub fn render_prometheus_with_staleness_check(&self, filter_stale: bool) -> String {
         let mut output = String::new();
         let mut seen_metrics: HashSet<String> = HashSet::new();
+        let now = Instant::now();
 
-        // Collect all points (cloned to avoid lifetime issues with DashMap)
+        // Collect all points, optionally filtering out stale clusters
         let all_points: Vec<MetricPoint> = self
             .metrics
             .iter()
+            .filter(|entry| {
+                if !filter_stale {
+                    return true;
+                }
+                // Check if this cluster's data is fresh
+                if let Some(last_update) = self.last_update.get(entry.key()) {
+                    now.duration_since(*last_update) <= self.staleness_threshold
+                } else {
+                    false // No timestamp means stale
+                }
+            })
             .flat_map(|entry| entry.value().clone())
             .collect();
 
@@ -257,6 +314,31 @@ impl MetricsRegistry {
             METRIC_UP,
             if self.is_healthy() { 1 } else { 0 }
         ));
+
+        // Add last update timestamp metric per cluster
+        if !self.last_update_timestamp.is_empty() {
+            output.push_str(&format!(
+                "# HELP {} {}\n",
+                METRIC_LAST_UPDATE_TIMESTAMP, HELP_LAST_UPDATE_TIMESTAMP
+            ));
+            output.push_str(&format!("# TYPE {} gauge\n", METRIC_LAST_UPDATE_TIMESTAMP));
+            for entry in self.last_update_timestamp.iter() {
+                let cluster = entry.key();
+                let timestamp = entry.value();
+                // Only include non-stale clusters if filtering is enabled
+                if filter_stale {
+                    if let Some(last_update) = self.last_update.get(cluster) {
+                        if now.duration_since(*last_update) > self.staleness_threshold {
+                            continue;
+                        }
+                    }
+                }
+                output.push_str(&format!(
+                    "{}{{{}=\"{}\"}} {}\n",
+                    METRIC_LAST_UPDATE_TIMESTAMP, LABEL_CLUSTER_NAME, cluster, timestamp
+                ));
+            }
+        }
 
         output
     }
@@ -324,6 +406,7 @@ impl MetricsRegistry {
     pub fn remove_cluster(&self, cluster: &str) {
         self.metrics.remove(cluster);
         self.last_update.remove(cluster);
+        self.last_update_timestamp.remove(cluster);
     }
 
     pub fn cluster_count(&self) -> usize {

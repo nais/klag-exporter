@@ -15,6 +15,7 @@ pub const METRIC_GROUP_TOPIC_SUM_LAG: &str = "kafka_consumergroup_group_topic_su
 pub const METRIC_POLL_TIME_MS: &str = "kafka_consumergroup_poll_time_ms";
 pub const METRIC_SCRAPE_DURATION_SECONDS: &str = "kafka_lag_exporter_scrape_duration_seconds";
 pub const METRIC_UP: &str = "kafka_lag_exporter_up";
+pub const METRIC_LAST_UPDATE_TIMESTAMP: &str = "kafka_lag_exporter_last_update_timestamp_seconds";
 
 pub const LABEL_CLUSTER_NAME: &str = "cluster_name";
 pub const LABEL_GROUP: &str = "group";
@@ -36,3 +37,4 @@ pub const HELP_GROUP_TOPIC_SUM_LAG: &str = "Sum of offset lag per topic for a co
 pub const HELP_POLL_TIME_MS: &str = "Time taken to poll all offsets in milliseconds";
 pub const HELP_SCRAPE_DURATION_SECONDS: &str = "Duration of metrics collection in seconds";
 pub const HELP_UP: &str = "1 if the exporter is healthy, 0 otherwise";
+pub const HELP_LAST_UPDATE_TIMESTAMP: &str = "Unix timestamp of last successful metrics collection";

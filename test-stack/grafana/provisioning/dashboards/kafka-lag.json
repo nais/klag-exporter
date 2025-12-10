@@ -239,7 +239,7 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
           },
           "mappings": [],
           "thresholds": {
@@ -248,6 +248,14 @@
               {
                 "color": "green",
                 "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 30
+              },
+              {
+                "color": "red",
+                "value": 60
               }
             ]
           },
@@ -281,12 +289,13 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "kafka_lag_exporter_scrape_duration_seconds",
-          "legendFormat": "Scrape Duration",
+          "expr": "time() - kafka_lag_exporter_last_update_timestamp_seconds{cluster_name=~\"$cluster\"}",
+          "legendFormat": "Data Age",
           "refId": "A"
         }
       ],
-      "title": "Scrape Duration",
+      "title": "Data Age",
+      "description": "How old is the metrics data. Green < 30s, Yellow 30-60s, Red > 60s",
       "type": "stat"
     },
     {
