@@ -1,0 +1,161 @@
+version: '3.8'
+
+services:
+  # Kafka cluster using KRaft (no Zookeeper)
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    hostname: kafka
+    container_name: kafka
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    networks:
+      - klag-network
+
+  # Kafka UI for debugging (optional)
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - klag-network
+
+  # klag-exporter
+  klag-exporter:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: klag-exporter
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./klag-config.toml:/app/config.toml:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - klag-network
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    depends_on:
+      - klag-exporter
+    networks:
+      - klag-network
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - klag-network
+
+  # Producer - generates messages at configurable rate
+  producer:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: producer
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/scripts:ro
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        echo "Waiting for Kafka to be ready..."
+        sleep 10
+
+        # Create topics
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic test-topic --partitions 6 --replication-factor 1
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic high-volume-topic --partitions 3 --replication-factor 1
+
+        echo "Starting producer..."
+        /scripts/producer.sh
+    networks:
+      - klag-network
+
+  # Consumer - consumes messages at configurable rate (slower than producer to create lag)
+  consumer:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: consumer
+    depends_on:
+      kafka:
+        condition: service_healthy
+      producer:
+        condition: service_started
+    volumes:
+      - ./scripts:/scripts:ro
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        echo "Waiting for topics and some messages..."
+        sleep 20
+
+        echo "Starting consumer..."
+        /scripts/consumer.sh
+    networks:
+      - klag-network
+
+volumes:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  klag-network:
+    driver: bridge

@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.75-bookworm AS builder
+FROM rust:1.83-bookworm AS builder
 
 # Install build dependencies for rdkafka
 RUN apt-get update && apt-get install -y \
@@ -35,6 +35,8 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
     libsasl2-2 \
+    curl \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
