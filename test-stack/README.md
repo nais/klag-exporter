@@ -9,6 +9,7 @@ A complete Docker Compose setup to test and demonstrate the klag-exporter with K
 - **klag-exporter** - The Kafka consumer lag exporter
 - **Prometheus** - Metrics storage and querying
 - **Grafana** - Pre-configured dashboard for lag visualization
+- **OpenTelemetry Collector** - Receives OTLP metrics and exports to various backends
 - **Producer** - Generates messages at varying rates
 - **Consumer** - Consumes messages slower than producer (creates lag)
 
@@ -36,6 +37,8 @@ docker-compose down -v
 | Prometheus | http://localhost:9090 | - |
 | klag-exporter | http://localhost:8000/metrics | - |
 | Kafka UI | http://localhost:8080 | - |
+| OTel Collector metrics | http://localhost:8889/metrics | - |
+| OTel Collector health | http://localhost:8888/metrics | - |
 
 ## What to Observe
 
@@ -91,6 +94,37 @@ Key metrics:
 - `kafka_consumergroup_group_max_lag_seconds` - Max time lag per group
 - `kafka_partition_latest_offset` - Latest offset per partition
 - `kafka_lag_exporter_scrape_duration_seconds` - Collection time
+
+### 4. OpenTelemetry Metrics
+
+The klag-exporter sends OTLP metrics to the OpenTelemetry Collector every 15 seconds.
+
+**View OTel Collector received metrics:**
+```bash
+# Metrics exported by the collector (from klag-exporter)
+curl http://localhost:8889/metrics | grep klag
+
+# Collector's own internal metrics
+curl http://localhost:8888/metrics
+```
+
+**View OTel Collector logs (shows received metrics):**
+```bash
+docker-compose logs -f otel-collector
+```
+
+The collector exports metrics in two ways:
+1. **Debug exporter** - Logs metrics to stdout (visible in `docker-compose logs otel-collector`)
+2. **Prometheus exporter** - Makes metrics scrapeable at http://localhost:8889/metrics
+
+**Verify OTel data flow:**
+```bash
+# Check if klag-exporter is sending metrics
+docker-compose logs klag-exporter | grep -i otel
+
+# Check collector is receiving
+docker-compose logs otel-collector | grep -i "metrics"
+```
 
 ## Manual Testing
 
@@ -208,7 +242,7 @@ docker-compose up -d --scale consumer=3
 ## Architecture
 
 ```
-┌──────────────┐     ┌──────────────┐
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
 │   Producer   │────▶│    Kafka     │◀────│   Consumer   │
 └──────────────┘     └──────────────┘     └──────────────┘
                             │
@@ -218,18 +252,19 @@ docker-compose up -d --scale consumer=3
                      │klag-exporter │
                      │   :8000      │
                      └──────────────┘
-                            │
-                            │ /metrics
-                            ▼
-                     ┌──────────────┐
-                     │  Prometheus  │
-                     │   :9090      │
-                     └──────────────┘
-                            │
-                            │ PromQL
-                            ▼
-                     ┌──────────────┐
-                     │   Grafana    │
-                     │   :3000      │
-                     └──────────────┘
+                       │         │
+          /metrics     │         │ OTLP (gRPC :4317)
+                       │         │
+                       ▼         ▼
+              ┌──────────────┐  ┌──────────────┐
+              │  Prometheus  │  │OTel Collector│
+              │   :9090      │  │ :8889/:8888  │
+              └──────────────┘  └──────────────┘
+                       │
+                       │ PromQL
+                       ▼
+              ┌──────────────┐
+              │   Grafana    │
+              │   :3000      │
+              └──────────────┘
 ```

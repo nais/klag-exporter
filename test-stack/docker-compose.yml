@@ -106,6 +106,21 @@ services:
     networks:
       - klag-network
 
+  # OpenTelemetry Collector - receives OTLP metrics from klag-exporter
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.91.0
+    container_name: otel-collector
+    ports:
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+      - "8888:8888"   # Prometheus metrics exposed by collector
+      - "8889:8889"   # Prometheus exporter (metrics received from klag-exporter)
+    volumes:
+      - ./otel/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    networks:
+      - klag-network
+
   # Producer - generates messages at configurable rate
   producer:
     image: confluentinc/cp-kafka:7.5.0

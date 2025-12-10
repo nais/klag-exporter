@@ -12,7 +12,9 @@ cache_ttl = "30s"
 max_concurrent_fetches = 10
 
 [exporter.otel]
-enabled = false
+enabled = true
+endpoint = "http://otel-collector:4317"
+export_interval = "15s"
 
 [[clusters]]
 name = "test-cluster"
