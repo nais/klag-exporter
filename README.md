@@ -325,6 +325,24 @@ A pre-built Grafana dashboard is included in `test-stack/grafana/provisioning/da
 - Message rate calculations
 - Exporter health status
 
+## Security Considerations
+
+### Timestamp Sampling and Message Content
+
+To calculate accurate time lag, klag-exporter fetches messages from Kafka® at the consumer group's committed offset to read the message timestamp. **Only the timestamp metadata is extracted** — the message payload (key and value) is never read, logged, or stored.
+
+| Risk | Level | Notes |
+|------|-------|-------|
+| Data exposure in logs | **None** | Only topic/partition/offset/timestamp logged, never payload |
+| Data in memory | **Low** | Payload briefly in process memory (~ms), then dropped |
+| Data exfiltration | **None** | Payload never sent, stored, or exposed via API |
+| Network exposure | **Same as any consumer** | Use TLS (`security.protocol=SSL`) for encryption |
+
+**For sensitive environments:**
+- Disable timestamp sampling with `timestamp_sampling.enabled = false` — you'll still get offset lag metrics
+- Fetch size is limited to 256KB per partition to minimize data transfer
+- Run klag-exporter with minimal privileges and restricted network access
+
 ## Troubleshooting
 
 ### Time Lag Shows Gaps in Grafana
