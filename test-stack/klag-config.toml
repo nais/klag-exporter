@@ -9,7 +9,7 @@ granularity = "partition"
 [exporter.timestamp_sampling]
 enabled = true
 cache_ttl = "30s"
-max_concurrent_fetches = 10
+max_concurrent_fetches = 20
 
 [exporter.otel]
 enabled = true

@@ -7,6 +7,7 @@ BOOTSTRAP_SERVER="kafka:29092"
 TOPIC1="test-topic"
 TOPIC2="high-volume-topic"
 TOPIC3="compacted-topic"
+TOPIC4="retention-test"
 
 # Message counter
 MSG_COUNT=0
@@ -93,6 +94,12 @@ while true; do
     # Phase 7: Compacted topic - many messages with same keys (triggers compaction)
     echo "[$(date)] Phase 7: Compacted topic - 100 keyed messages"
     produce_keyed_messages $TOPIC3 100 0.01
+
+    # Phase 8: Retention-test topic - continuous production for retention demo
+    # Topic has 60s retention, so messages older than 60s get deleted
+    # This creates a scenario where consumer's committed offset falls behind low_watermark
+    echo "[$(date)] Phase 8: Retention-test topic - 30 messages (will be deleted by retention)"
+    produce_messages $TOPIC4 30 0.1
 
     echo "[$(date)] Cycle complete. Total messages produced: $MSG_COUNT"
     echo "---"

@@ -5,6 +5,7 @@ use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
 use rdkafka::Offset;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tracing::{debug, instrument, warn};
 
@@ -15,24 +16,40 @@ pub struct TimestampFetchResult {
     pub timestamp_ms: i64,
 }
 
+/// Factory for creating consumers. Creates a fresh consumer for each fetch
+/// to avoid state conflicts when fetching timestamps concurrently.
 pub struct TimestampConsumer {
-    consumer: BaseConsumer,
+    config: ClusterConfig,
     cluster_name: String,
     fetch_timeout: Duration,
+    consumer_counter: AtomicU64,
 }
 
 impl TimestampConsumer {
     pub fn new(config: &ClusterConfig) -> Result<Self> {
+        Ok(Self {
+            config: config.clone(),
+            cluster_name: config.name.clone(),
+            fetch_timeout: Duration::from_secs(5),
+            consumer_counter: AtomicU64::new(0),
+        })
+    }
+
+    /// Create a fresh consumer for a single fetch operation.
+    /// Each consumer gets a unique client.id to avoid broker-side conflicts.
+    fn create_consumer(&self) -> Result<BaseConsumer> {
+        let counter = self.consumer_counter.fetch_add(1, Ordering::Relaxed);
+
         let mut client_config = ClientConfig::new();
         client_config
-            .set("bootstrap.servers", &config.bootstrap_servers)
+            .set("bootstrap.servers", &self.config.bootstrap_servers)
             .set(
                 "client.id",
-                format!("klag-exporter-ts-{}", config.name),
+                format!("klag-exporter-ts-{}-{}", self.config.name, counter),
             )
             .set(
                 "group.id",
-                format!("klag-exporter-ts-internal-{}", config.name),
+                format!("klag-exporter-ts-internal-{}", self.config.name),
             )
             .set("enable.auto.commit", "false")
             .set("auto.offset.reset", "earliest")
@@ -40,38 +57,30 @@ impl TimestampConsumer {
             .set("fetch.max.bytes", "1048576")
             .set("max.partition.fetch.bytes", "262144");
 
-        for (key, value) in &config.consumer_properties {
+        for (key, value) in &self.config.consumer_properties {
             client_config.set(key, value);
         }
 
-        let consumer: BaseConsumer = client_config.create()?;
-
-        Ok(Self {
-            consumer,
-            cluster_name: config.name.clone(),
-            fetch_timeout: Duration::from_secs(5),
-        })
+        client_config.create().map_err(KlagError::Kafka)
     }
 
     #[instrument(skip(self), fields(cluster = %self.cluster_name, topic = %tp.topic, partition = tp.partition, offset = offset))]
     pub fn fetch_timestamp(&self, tp: &TopicPartition, offset: i64) -> Result<Option<TimestampFetchResult>> {
         use rdkafka::TopicPartitionList;
 
+        // Create a fresh consumer for this fetch to avoid state conflicts
+        let consumer = self.create_consumer()?;
+
         let mut tpl = TopicPartitionList::new();
         tpl.add_partition_offset(&tp.topic, tp.partition, Offset::Offset(offset))
             .map_err(KlagError::Kafka)?;
 
-        self.consumer
+        consumer
             .assign(&tpl)
             .map_err(KlagError::Kafka)?;
 
-        // Seek to the exact offset to ensure we get that specific message
-        self.consumer
-            .seek(&tp.topic, tp.partition, Offset::Offset(offset), Duration::from_secs(5))
-            .map_err(KlagError::Kafka)?;
-
-        // Poll for message
-        match self.consumer.poll(self.fetch_timeout) {
+        // Poll for message - no seek needed since assign with offset already positions
+        match consumer.poll(self.fetch_timeout) {
             Some(result) => match result {
                 Ok(msg) => {
                     let timestamp = msg.timestamp().to_millis();
@@ -109,6 +118,7 @@ impl TimestampConsumer {
                 Ok(None)
             }
         }
+        // Consumer is dropped here, cleaning up resources
     }
 
     #[allow(dead_code)]

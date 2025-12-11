@@ -133,6 +133,9 @@ impl LagCalculator {
                     ts_data
                         .map(|td| ((now_ms - td.timestamp_ms) as f64) / 1000.0)
                         .map(|s| s.max(0.0))
+                        // For retention-affected partitions without timestamp, still emit metric
+                        // so it shows up in dashboards with retention_detected label
+                        .or_else(|| if retention_detected { Some(0.0) } else { None })
                 } else {
                     Some(0.0)
                 };
