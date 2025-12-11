@@ -1,6 +1,6 @@
 use crate::collector::offset_collector::{GroupSnapshot, OffsetsSnapshot};
 use crate::kafka::client::TopicPartition;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -11,6 +11,10 @@ pub struct LagMetrics {
     pub topic_metrics: Vec<TopicLagMetric>,
     pub partition_offsets: Vec<PartitionOffsetMetric>,
     pub poll_time_ms: u64,
+    /// Number of partitions where log compaction was detected
+    pub compaction_detected_count: u64,
+    /// Number of partitions where retention deletion was detected
+    pub retention_detected_count: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +29,10 @@ pub struct PartitionLagMetric {
     pub committed_offset: i64,
     pub lag: i64,
     pub lag_seconds: Option<f64>,
+    /// Whether compaction was detected for this partition's timestamp fetch
+    pub compaction_detected: bool,
+    /// Whether retention deletion was detected (committed_offset < low_watermark)
+    pub retention_detected: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -55,12 +63,19 @@ pub struct PartitionOffsetMetric {
 
 pub struct LagCalculator;
 
+/// Timestamp data for a partition
+#[derive(Debug, Clone)]
+pub struct TimestampData {
+    pub timestamp_ms: i64,
+}
+
 impl LagCalculator {
     pub fn calculate(
         snapshot: &OffsetsSnapshot,
-        timestamps: &HashMap<(String, TopicPartition), i64>,
+        timestamps: &HashMap<(String, TopicPartition), TimestampData>,
         now_ms: i64,
         poll_time_ms: u64,
+        compacted_topics: &HashSet<String>,
     ) -> LagMetrics {
         let mut partition_metrics = Vec::new();
         let mut group_metrics = Vec::new();
@@ -90,12 +105,15 @@ impl LagCalculator {
             let member_map = build_member_map(group);
 
             for (tp, committed_offset) in &group.offsets {
-                let high_watermark = snapshot
-                    .get_high_watermark(tp)
-                    .unwrap_or(*committed_offset);
+                let (low_watermark, high_watermark) = snapshot
+                    .get_watermark(tp)
+                    .unwrap_or((0, *committed_offset));
 
                 // Calculate lag, clamped to 0 for race conditions
                 let lag = (high_watermark - committed_offset).max(0);
+
+                // Detect retention deletion: committed offset is before the low watermark
+                let retention_detected = *committed_offset < low_watermark;
 
                 // Look up member info for this partition
                 let (member_host, consumer_id, client_id) = member_map
@@ -110,14 +128,16 @@ impl LagCalculator {
                     .unwrap_or_else(|| (String::new(), String::new(), String::new()));
 
                 // Calculate time lag if timestamp available
+                let ts_data = timestamps.get(&(group.group_id.clone(), tp.clone()));
                 let lag_seconds = if lag > 0 {
-                    timestamps
-                        .get(&(group.group_id.clone(), tp.clone()))
-                        .map(|ts| ((now_ms - ts) as f64) / 1000.0)
+                    ts_data
+                        .map(|td| ((now_ms - td.timestamp_ms) as f64) / 1000.0)
                         .map(|s| s.max(0.0))
                 } else {
                     Some(0.0)
                 };
+                // Compaction detected if topic has cleanup.policy=compact
+                let compaction_detected = compacted_topics.contains(&tp.topic);
 
                 partition_metrics.push(PartitionLagMetric {
                     cluster_name: snapshot.cluster_name.clone(),
@@ -130,13 +150,22 @@ impl LagCalculator {
                     committed_offset: *committed_offset,
                     lag,
                     lag_seconds,
+                    compaction_detected,
+                    retention_detected,
                 });
 
                 // Update aggregates
                 group_sum_lag += lag;
                 if lag > group_max_lag {
                     group_max_lag = lag;
-                    group_max_lag_seconds = lag_seconds;
+                }
+                // Track max time lag separately - use the max of all available time lags.
+                // This ensures max_lag_seconds reflects the worst case we CAN measure,
+                // even if the partition with highest offset lag has no timestamp.
+                if let Some(secs) = lag_seconds {
+                    group_max_lag_seconds = Some(
+                        group_max_lag_seconds.map_or(secs, |current| current.max(secs)),
+                    );
                 }
 
                 *topic_lags.entry(tp.topic.clone()).or_insert(0) += lag;
@@ -162,6 +191,16 @@ impl LagCalculator {
             }
         }
 
+        // Count compaction and retention detections from partition metrics
+        let compaction_detected_count = partition_metrics
+            .iter()
+            .filter(|m| m.compaction_detected)
+            .count() as u64;
+        let retention_detected_count = partition_metrics
+            .iter()
+            .filter(|m| m.retention_detected)
+            .count() as u64;
+
         LagMetrics {
             cluster_name: snapshot.cluster_name.clone(),
             partition_metrics,
@@ -169,6 +208,8 @@ impl LagCalculator {
             topic_metrics,
             partition_offsets,
             poll_time_ms,
+            compaction_detected_count,
+            retention_detected_count,
         }
     }
 }
@@ -259,7 +300,7 @@ mod tests {
         let timestamps = HashMap::new();
         let now_ms = 1000000;
 
-        let metrics = LagCalculator::calculate(&snapshot, &timestamps, now_ms, 100);
+        let metrics = LagCalculator::calculate(&snapshot, &timestamps, now_ms, 100, &HashSet::new());
 
         // topic1 partition 0: 100 - 90 = 10
         // topic1 partition 1: 200 - 150 = 50
@@ -293,11 +334,13 @@ mod tests {
         // Message at offset 90 was produced at time 900000 (100 seconds ago)
         timestamps.insert(
             ("test-group".to_string(), TopicPartition::new("topic1", 0)),
-            900000,
+            TimestampData {
+                timestamp_ms: 900000,
+            },
         );
 
         let now_ms = 1000000;
-        let metrics = LagCalculator::calculate(&snapshot, &timestamps, now_ms, 100);
+        let metrics = LagCalculator::calculate(&snapshot, &timestamps, now_ms, 100, &HashSet::new());
 
         let p0 = metrics
             .partition_metrics
@@ -306,6 +349,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(p0.lag_seconds, Some(100.0));
+        assert!(!p0.compaction_detected);
     }
 
     #[test]
@@ -329,7 +373,7 @@ mod tests {
             timestamp_ms: 0,
         };
 
-        let metrics = LagCalculator::calculate(&snapshot, &HashMap::new(), 0, 100);
+        let metrics = LagCalculator::calculate(&snapshot, &HashMap::new(), 0, 100, &HashSet::new());
 
         let p0 = metrics
             .partition_metrics
@@ -344,7 +388,7 @@ mod tests {
     #[test]
     fn test_lag_calculator_max_lag_aggregation() {
         let snapshot = make_snapshot();
-        let metrics = LagCalculator::calculate(&snapshot, &HashMap::new(), 0, 100);
+        let metrics = LagCalculator::calculate(&snapshot, &HashMap::new(), 0, 100, &HashSet::new());
 
         let group_metric = metrics
             .group_metrics
@@ -359,7 +403,7 @@ mod tests {
     #[test]
     fn test_lag_calculator_sum_lag_aggregation() {
         let snapshot = make_snapshot();
-        let metrics = LagCalculator::calculate(&snapshot, &HashMap::new(), 0, 100);
+        let metrics = LagCalculator::calculate(&snapshot, &HashMap::new(), 0, 100, &HashSet::new());
 
         let group_metric = metrics
             .group_metrics
@@ -374,7 +418,7 @@ mod tests {
     #[test]
     fn test_topic_sum_lag() {
         let snapshot = make_snapshot();
-        let metrics = LagCalculator::calculate(&snapshot, &HashMap::new(), 0, 100);
+        let metrics = LagCalculator::calculate(&snapshot, &HashMap::new(), 0, 100, &HashSet::new());
 
         let topic1_metric = metrics
             .topic_metrics
@@ -389,7 +433,7 @@ mod tests {
     #[test]
     fn test_partition_offset_metrics() {
         let snapshot = make_snapshot();
-        let metrics = LagCalculator::calculate(&snapshot, &HashMap::new(), 0, 100);
+        let metrics = LagCalculator::calculate(&snapshot, &HashMap::new(), 0, 100, &HashSet::new());
 
         assert_eq!(metrics.partition_offsets.len(), 3);
 

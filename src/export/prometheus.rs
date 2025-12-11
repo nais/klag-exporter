@@ -47,6 +47,8 @@ mod tests {
                 committed_offset: 100,
                 lag: 10,
                 lag_seconds: Some(5.0),
+                compaction_detected: false,
+                retention_detected: false,
             }],
             group_metrics: vec![GroupLagMetric {
                 cluster_name: "test".to_string(),
@@ -69,6 +71,8 @@ mod tests {
                 latest_offset: 110,
             }],
             poll_time_ms: 100,
+            compaction_detected_count: 0,
+            retention_detected_count: 0,
         };
 
         registry.update("test", metrics);

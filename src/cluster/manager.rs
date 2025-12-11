@@ -1,4 +1,4 @@
-use crate::collector::lag_calculator::LagCalculator;
+use crate::collector::lag_calculator::{LagCalculator, TimestampData};
 use crate::collector::offset_collector::OffsetCollector;
 use crate::collector::timestamp_sampler::TimestampSampler;
 use crate::config::{ClusterConfig, ExporterConfig, Granularity};
@@ -7,7 +7,7 @@ use crate::kafka::client::{KafkaClient, TopicPartition};
 use crate::kafka::TimestampConsumer;
 use crate::metrics::registry::MetricsRegistry;
 use futures::future::join_all;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Semaphore};
@@ -19,6 +19,7 @@ const DEFAULT_COLLECTION_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct ClusterManager {
     cluster_name: String,
     cluster_labels: HashMap<String, String>,
+    client: Arc<KafkaClient>,
     offset_collector: OffsetCollector,
     timestamp_sampler: Option<TimestampSampler>,
     registry: Arc<MetricsRegistry>,
@@ -73,6 +74,7 @@ impl ClusterManager {
         Ok(Self {
             cluster_name,
             cluster_labels,
+            client,
             offset_collector,
             timestamp_sampler,
             registry,
@@ -189,6 +191,28 @@ impl ClusterManager {
             "Collected offsets"
         );
 
+        // Fetch compacted topics (topics with cleanup.policy=compact)
+        let compacted_topics = match self.client.fetch_compacted_topics().await {
+            Ok(topics) => {
+                if !topics.is_empty() {
+                    debug!(
+                        cluster = %self.cluster_name,
+                        compacted_topics = ?topics,
+                        "Identified compacted topics"
+                    );
+                }
+                topics
+            }
+            Err(e) => {
+                warn!(
+                    cluster = %self.cluster_name,
+                    error = %e,
+                    "Failed to fetch topic configs, assuming no compacted topics"
+                );
+                HashSet::new()
+            }
+        };
+
         // Collect timestamps if enabled (with concurrency limit)
         let timestamps = if let Some(ref sampler) = self.timestamp_sampler {
             self.collect_timestamps_concurrent(sampler, &snapshot).await
@@ -203,7 +227,8 @@ impl ClusterManager {
             .as_millis() as i64;
 
         let poll_time_ms = start.elapsed().as_millis() as u64;
-        let lag_metrics = LagCalculator::calculate(&snapshot, &timestamps, now_ms, poll_time_ms);
+        let lag_metrics =
+            LagCalculator::calculate(&snapshot, &timestamps, now_ms, poll_time_ms, &compacted_topics);
 
         // Update registry with granularity and custom labels
         self.registry.update_with_options(
@@ -231,7 +256,7 @@ impl ClusterManager {
         &self,
         sampler: &TimestampSampler,
         snapshot: &crate::collector::offset_collector::OffsetsSnapshot,
-    ) -> HashMap<(String, TopicPartition), i64> {
+    ) -> HashMap<(String, TopicPartition), TimestampData> {
         // Build list of requests for partitions with lag
         let mut requests: Vec<(String, TopicPartition, i64)> = Vec::new();
 
@@ -284,8 +309,13 @@ impl ClusterManager {
         let mut timestamps = HashMap::new();
         for result in results {
             match result {
-                Ok(((group_id, tp), Ok(Some(ts)))) => {
-                    timestamps.insert((group_id, tp), ts);
+                Ok(((group_id, tp), Ok(Some(ts_result)))) => {
+                    timestamps.insert(
+                        (group_id, tp),
+                        TimestampData {
+                            timestamp_ms: ts_result.timestamp_ms,
+                        },
+                    );
                 }
                 Ok(((group_id, tp), Ok(None))) => {
                     debug!(

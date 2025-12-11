@@ -16,6 +16,8 @@ pub const METRIC_POLL_TIME_MS: &str = "kafka_consumergroup_poll_time_ms";
 pub const METRIC_SCRAPE_DURATION_SECONDS: &str = "kafka_lag_exporter_scrape_duration_seconds";
 pub const METRIC_UP: &str = "kafka_lag_exporter_up";
 pub const METRIC_LAST_UPDATE_TIMESTAMP: &str = "kafka_lag_exporter_last_update_timestamp_seconds";
+pub const METRIC_COMPACTION_DETECTED: &str = "kafka_lag_exporter_compaction_detected_total";
+pub const METRIC_RETENTION_DETECTED: &str = "kafka_lag_exporter_retention_detected_total";
 
 pub const LABEL_CLUSTER_NAME: &str = "cluster_name";
 pub const LABEL_GROUP: &str = "group";
@@ -24,6 +26,8 @@ pub const LABEL_PARTITION: &str = "partition";
 pub const LABEL_MEMBER_HOST: &str = "member_host";
 pub const LABEL_CONSUMER_ID: &str = "consumer_id";
 pub const LABEL_CLIENT_ID: &str = "client_id";
+pub const LABEL_COMPACTION_DETECTED: &str = "compaction_detected";
+pub const LABEL_RETENTION_DETECTED: &str = "retention_detected";
 
 pub const HELP_PARTITION_LATEST_OFFSET: &str = "Latest (high watermark) offset for a partition";
 pub const HELP_PARTITION_EARLIEST_OFFSET: &str = "Earliest (low watermark) offset for a partition";
@@ -38,3 +42,5 @@ pub const HELP_POLL_TIME_MS: &str = "Time taken to poll all offsets in milliseco
 pub const HELP_SCRAPE_DURATION_SECONDS: &str = "Duration of metrics collection in seconds";
 pub const HELP_UP: &str = "1 if the exporter is healthy, 0 otherwise";
 pub const HELP_LAST_UPDATE_TIMESTAMP: &str = "Unix timestamp of last successful metrics collection";
+pub const HELP_COMPACTION_DETECTED: &str = "Number of partitions where log compaction was detected (time lag may be understated)";
+pub const HELP_RETENTION_DETECTED: &str = "Number of partitions where retention deletion was detected (committed offset < low watermark, time lag may be understated)";

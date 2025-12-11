@@ -8,6 +8,13 @@ use rdkafka::Offset;
 use std::time::Duration;
 use tracing::{debug, instrument, warn};
 
+/// Result of fetching a timestamp from Kafka
+#[derive(Debug, Clone)]
+pub struct TimestampFetchResult {
+    /// The timestamp in milliseconds
+    pub timestamp_ms: i64,
+}
+
 pub struct TimestampConsumer {
     consumer: BaseConsumer,
     cluster_name: String,
@@ -47,7 +54,7 @@ impl TimestampConsumer {
     }
 
     #[instrument(skip(self), fields(cluster = %self.cluster_name, topic = %tp.topic, partition = tp.partition, offset = offset))]
-    pub fn fetch_timestamp(&self, tp: &TopicPartition, offset: i64) -> Result<Option<i64>> {
+    pub fn fetch_timestamp(&self, tp: &TopicPartition, offset: i64) -> Result<Option<TimestampFetchResult>> {
         use rdkafka::TopicPartitionList;
 
         let mut tpl = TopicPartitionList::new();
@@ -58,19 +65,29 @@ impl TimestampConsumer {
             .assign(&tpl)
             .map_err(KlagError::Kafka)?;
 
+        // Seek to the exact offset to ensure we get that specific message
+        self.consumer
+            .seek(&tp.topic, tp.partition, Offset::Offset(offset), Duration::from_secs(5))
+            .map_err(KlagError::Kafka)?;
+
         // Poll for message
         match self.consumer.poll(self.fetch_timeout) {
             Some(result) => match result {
                 Ok(msg) => {
                     let timestamp = msg.timestamp().to_millis();
+
                     debug!(
                         topic = tp.topic,
                         partition = tp.partition,
-                        offset = offset,
+                        requested_offset = offset,
+                        actual_offset = msg.offset(),
                         timestamp = ?timestamp,
                         "Fetched message timestamp"
                     );
-                    Ok(timestamp)
+
+                    Ok(timestamp.map(|ts| TimestampFetchResult {
+                        timestamp_ms: ts,
+                    }))
                 }
                 Err(e) => {
                     warn!(
@@ -98,7 +115,7 @@ impl TimestampConsumer {
     pub fn fetch_timestamps_batch(
         &self,
         requests: &[(TopicPartition, i64)],
-    ) -> Vec<(TopicPartition, Result<Option<i64>>)> {
+    ) -> Vec<(TopicPartition, Result<Option<TimestampFetchResult>>)> {
         requests
             .iter()
             .map(|(tp, offset)| {

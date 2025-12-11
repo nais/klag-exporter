@@ -6,6 +6,7 @@
 BOOTSTRAP_SERVER="kafka:29092"
 TOPIC1="test-topic"
 TOPIC2="high-volume-topic"
+TOPIC3="compacted-topic"
 GROUP_ID="test-consumer-group"
 
 # Message counter
@@ -69,6 +70,11 @@ while true; do
     consume_with_rate $TOPIC1 $GROUP_ID 20 0.1 &
     consume_with_rate $TOPIC2 "high-volume-consumer" 40 0.05 &
     wait
+
+    # Phase 8: Compacted topic - VERY slow consumption (to build up lag for compaction detection)
+    # Only consume 2 messages per cycle to ensure lag builds up faster than consumption
+    echo "[$(date)] Phase 8: Compacted topic - very slow consumption (2 msgs)"
+    consume_with_rate $TOPIC3 "compacted-consumer" 2 1.0
 
     echo "[$(date)] Consumer cycle complete"
     echo "---"

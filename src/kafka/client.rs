@@ -1,13 +1,13 @@
 use crate::config::ClusterConfig;
 use crate::error::{KlagError, Result};
-use rdkafka::admin::{AdminClient, AdminOptions};
+use rdkafka::admin::{AdminClient, AdminOptions, ResourceSpecifier};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::groups::GroupList;
 use rdkafka::metadata::Metadata;
 use rdkafka::TopicPartitionList;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tracing::{debug, instrument, warn};
 
@@ -297,6 +297,71 @@ impl KafkaClient {
     #[allow(dead_code)]
     pub fn admin_options(&self) -> AdminOptions {
         AdminOptions::new().request_timeout(Some(self.timeout))
+    }
+
+    /// Fetch topics that have compaction enabled (cleanup.policy contains "compact")
+    #[instrument(skip(self), fields(cluster = %self.config.name))]
+    pub async fn fetch_compacted_topics(&self) -> Result<HashSet<String>> {
+        let metadata = self.fetch_metadata()?;
+        let topic_names: Vec<String> = metadata
+            .topics()
+            .iter()
+            .map(|t| t.name().to_string())
+            .collect();
+
+        if topic_names.is_empty() {
+            return Ok(HashSet::new());
+        }
+
+        let resources: Vec<ResourceSpecifier> = topic_names
+            .iter()
+            .map(|name| ResourceSpecifier::Topic(name.as_str()))
+            .collect();
+
+        let opts = self.admin_options();
+        let results = self
+            .admin
+            .describe_configs(resources.iter(), &opts)
+            .await
+            .map_err(KlagError::Kafka)?;
+
+        let mut compacted_topics = HashSet::new();
+
+        for result in results {
+            match result {
+                Ok(resource) => {
+                    // Extract topic name from OwnedResourceSpecifier
+                    let topic_name = match &resource.specifier {
+                        rdkafka::admin::OwnedResourceSpecifier::Topic(name) => name.clone(),
+                        _ => continue, // Skip non-topic resources
+                    };
+                    for entry in resource.entries {
+                        if entry.name == "cleanup.policy" {
+                            if let Some(value) = entry.value {
+                                if value.contains("compact") {
+                                    debug!(topic = %topic_name, cleanup_policy = %value, "Topic has compaction enabled");
+                                    compacted_topics.insert(topic_name.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        "Failed to describe config for resource"
+                    );
+                }
+            }
+        }
+
+        debug!(
+            count = compacted_topics.len(),
+            topics = ?compacted_topics,
+            "Identified compacted topics"
+        );
+
+        Ok(compacted_topics)
     }
 }
 
