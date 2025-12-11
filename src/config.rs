@@ -161,10 +161,15 @@ impl Config {
     }
 
     fn substitute_env_vars(content: &str) -> String {
-        let re = Regex::new(r"\$\{([^}]+)\}").unwrap();
+        // Supports:
+        // - ${VAR} - replaced with env var value, empty string if not set
+        // - ${VAR:-default} - replaced with env var value, or "default" if not set
+        // - ${?VAR} - replaced with env var value if set, empty string if not set (same as ${VAR})
+        let re = Regex::new(r"\$\{\??([^}:-]+)(?::-([^}]*))?\}").unwrap();
         re.replace_all(content, |caps: &regex::Captures| {
             let var_name = &caps[1];
-            std::env::var(var_name).unwrap_or_default()
+            let default_value = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+            std::env::var(var_name).unwrap_or_else(|_| default_value.to_string())
         })
         .to_string()
     }
@@ -309,6 +314,51 @@ bootstrap_servers = "localhost:9092"
         );
 
         std::env::remove_var("TEST_KAFKA_USER");
+    }
+
+    #[test]
+    fn test_config_env_with_default() {
+        // Ensure env var is NOT set
+        std::env::remove_var("TEST_NONEXISTENT_VAR");
+
+        let config_content = r#"
+[exporter]
+poll_interval = "30s"
+
+[[clusters]]
+name = "test"
+bootstrap_servers = "${TEST_NONEXISTENT_VAR:-localhost:9092}"
+"#;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(config_content.as_bytes()).unwrap();
+
+        let config = Config::load(Some(file.path().to_str().unwrap())).unwrap();
+        // Should use default value since env var is not set
+        assert_eq!(config.clusters[0].bootstrap_servers, "localhost:9092");
+    }
+
+    #[test]
+    fn test_config_env_override_default() {
+        std::env::set_var("TEST_BOOTSTRAP", "kafka:29092");
+
+        let config_content = r#"
+[exporter]
+poll_interval = "30s"
+
+[[clusters]]
+name = "test"
+bootstrap_servers = "${TEST_BOOTSTRAP:-localhost:9092}"
+"#;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(config_content.as_bytes()).unwrap();
+
+        let config = Config::load(Some(file.path().to_str().unwrap())).unwrap();
+        // Should use env var value instead of default
+        assert_eq!(config.clusters[0].bootstrap_servers, "kafka:29092");
+
+        std::env::remove_var("TEST_BOOTSTRAP");
     }
 
     #[test]
