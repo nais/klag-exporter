@@ -13,6 +13,13 @@ struct CachedTimestamp {
     cached_at: Instant,
 }
 
+/// Result of getting a timestamp
+#[derive(Debug, Clone)]
+pub struct TimestampResult {
+    /// The timestamp in milliseconds
+    pub timestamp_ms: i64,
+}
+
 /// Inner struct holding the actual sampler state
 struct TimestampSamplerInner {
     consumer: TimestampConsumer,
@@ -43,7 +50,7 @@ impl TimestampSampler {
         group_id: &str,
         tp: &TopicPartition,
         offset: i64,
-    ) -> Result<Option<i64>> {
+    ) -> Result<Option<TimestampResult>> {
         let key = (group_id.to_string(), tp.clone());
 
         // Check cache
@@ -56,26 +63,30 @@ impl TimestampSampler {
                     cached_timestamp = cached.timestamp_ms,
                     "Using cached timestamp"
                 );
-                return Ok(Some(cached.timestamp_ms));
+                return Ok(Some(TimestampResult {
+                    timestamp_ms: cached.timestamp_ms,
+                }));
             }
         }
 
         // Fetch from Kafka
-        let timestamp = self.inner.consumer.fetch_timestamp(tp, offset)?;
+        let fetch_result = self.inner.consumer.fetch_timestamp(tp, offset)?;
 
         // Cache the result
-        if let Some(ts) = timestamp {
+        if let Some(ref result) = fetch_result {
             self.inner.cache.insert(
                 key,
                 CachedTimestamp {
-                    timestamp_ms: ts,
+                    timestamp_ms: result.timestamp_ms,
                     offset,
                     cached_at: Instant::now(),
                 },
             );
         }
 
-        Ok(timestamp)
+        Ok(fetch_result.map(|r| TimestampResult {
+            timestamp_ms: r.timestamp_ms,
+        }))
     }
 
     #[allow(dead_code)]
@@ -83,7 +94,7 @@ impl TimestampSampler {
     pub fn get_timestamps_batch(
         &self,
         requests: &[(String, TopicPartition, i64)],
-    ) -> Vec<((String, TopicPartition), Result<Option<i64>>)> {
+    ) -> Vec<((String, TopicPartition), Result<Option<TimestampResult>>)> {
         requests
             .iter()
             .map(|(group_id, tp, offset)| {

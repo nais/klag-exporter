@@ -1,6 +1,18 @@
 use crate::collector::lag_calculator::LagMetrics;
 use crate::config::Granularity;
-use crate::metrics::definitions::*;
+use crate::metrics::definitions::{
+    HELP_COMPACTION_DETECTED, HELP_GROUP_LAG, HELP_GROUP_LAG_SECONDS, HELP_GROUP_MAX_LAG,
+    HELP_GROUP_MAX_LAG_SECONDS, HELP_GROUP_OFFSET, HELP_GROUP_SUM_LAG, HELP_GROUP_TOPIC_SUM_LAG,
+    HELP_LAST_UPDATE_TIMESTAMP, HELP_PARTITION_EARLIEST_OFFSET, HELP_PARTITION_LATEST_OFFSET,
+    HELP_POLL_TIME_MS, HELP_RETENTION_DETECTED, HELP_SCRAPE_DURATION_SECONDS, HELP_UP,
+    LABEL_CLIENT_ID, LABEL_CLUSTER_NAME, LABEL_COMPACTION_DETECTED, LABEL_CONSUMER_ID, LABEL_GROUP,
+    LABEL_MEMBER_HOST, LABEL_PARTITION, LABEL_RETENTION_DETECTED, LABEL_TOPIC,
+    METRIC_COMPACTION_DETECTED, METRIC_GROUP_LAG, METRIC_GROUP_LAG_SECONDS, METRIC_GROUP_MAX_LAG,
+    METRIC_GROUP_MAX_LAG_SECONDS, METRIC_GROUP_OFFSET, METRIC_GROUP_SUM_LAG,
+    METRIC_GROUP_TOPIC_SUM_LAG, METRIC_LAST_UPDATE_TIMESTAMP, METRIC_PARTITION_EARLIEST_OFFSET,
+    METRIC_PARTITION_LATEST_OFFSET, METRIC_POLL_TIME_MS, METRIC_RETENTION_DETECTED,
+    METRIC_SCRAPE_DURATION_SECONDS, METRIC_UP,
+};
 use crate::metrics::types::{Labels, MetricPoint, OtelDataPoint, OtelMetric};
 use dashmap::DashMap;
 use std::collections::{HashMap, HashSet};
@@ -111,6 +123,15 @@ impl MetricsRegistry {
                     ));
 
                     if let Some(lag_seconds) = m.lag_seconds {
+                        // Add compaction_detected and retention_detected labels to lag_seconds metric
+                        labels.insert(
+                            LABEL_COMPACTION_DETECTED.to_string(),
+                            m.compaction_detected.to_string(),
+                        );
+                        labels.insert(
+                            LABEL_RETENTION_DETECTED.to_string(),
+                            m.retention_detected.to_string(),
+                        );
                         points.push(MetricPoint::gauge(
                             METRIC_GROUP_LAG_SECONDS,
                             labels,
@@ -178,9 +199,25 @@ impl MetricsRegistry {
         add_custom_labels(&mut poll_labels);
         points.push(MetricPoint::gauge(
             METRIC_POLL_TIME_MS,
-            poll_labels,
+            poll_labels.clone(),
             lag_metrics.poll_time_ms as f64,
             HELP_POLL_TIME_MS,
+        ));
+
+        // Compaction detected metric
+        points.push(MetricPoint::gauge(
+            METRIC_COMPACTION_DETECTED,
+            poll_labels.clone(),
+            lag_metrics.compaction_detected_count as f64,
+            HELP_COMPACTION_DETECTED,
+        ));
+
+        // Retention detected metric
+        points.push(MetricPoint::gauge(
+            METRIC_RETENTION_DETECTED,
+            poll_labels,
+            lag_metrics.retention_detected_count as f64,
+            HELP_RETENTION_DETECTED,
         ));
 
         // Store metrics and update timestamps
@@ -465,6 +502,8 @@ mod tests {
                 committed_offset: 100,
                 lag: 10,
                 lag_seconds: Some(5.5),
+                compaction_detected: false,
+                retention_detected: false,
             }],
             group_metrics: vec![GroupLagMetric {
                 cluster_name: "test-cluster".to_string(),
@@ -487,6 +526,8 @@ mod tests {
                 latest_offset: 110,
             }],
             poll_time_ms: 50,
+            compaction_detected_count: 0,
+            retention_detected_count: 0,
         }
     }
 
