@@ -27,10 +27,11 @@ impl TopicPartition {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ConsumerGroupInfo {
     pub group_id: String,
+    #[allow(dead_code)]
     pub protocol_type: String,
+    #[allow(dead_code)]
     pub state: String,
 }
 
@@ -43,11 +44,12 @@ pub struct GroupMemberInfo {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct GroupDescription {
     pub group_id: String,
     pub state: String,
+    #[allow(dead_code)]
     pub protocol_type: String,
+    #[allow(dead_code)]
     pub protocol: String,
     pub members: Vec<GroupMemberInfo>,
 }
@@ -59,7 +61,6 @@ pub enum OffsetPosition {
     Latest,
 }
 
-#[allow(dead_code)]
 pub struct KafkaClient {
     admin: AdminClient<DefaultClientContext>,
     consumer: BaseConsumer,

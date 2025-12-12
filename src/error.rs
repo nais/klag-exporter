@@ -1,7 +1,6 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-#[allow(dead_code)]
 pub enum KlagError {
     #[error("Configuration error: {0}")]
     Config(String),
@@ -15,12 +14,15 @@ pub enum KlagError {
     #[error("Regex error: {0}")]
     Regex(#[from] regex::Error),
 
+    #[allow(dead_code)]
     #[error("Invalid offset: {0}")]
     InvalidOffset(String),
 
+    #[allow(dead_code)]
     #[error("Timeout: {0}")]
     Timeout(String),
 
+    #[allow(dead_code)]
     #[error("Channel error: {0}")]
     Channel(String),
 

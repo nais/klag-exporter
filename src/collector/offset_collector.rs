@@ -11,18 +11,18 @@ pub struct OffsetCollector {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct OffsetsSnapshot {
     pub cluster_name: String,
     pub groups: Vec<GroupSnapshot>,
     pub watermarks: HashMap<TopicPartition, (i64, i64)>,
+    #[allow(dead_code)]
     pub timestamp_ms: i64,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct GroupSnapshot {
     pub group_id: String,
+    #[allow(dead_code)]
     pub state: String,
     pub members: Vec<MemberSnapshot>,
     pub offsets: HashMap<TopicPartition, i64>,
@@ -180,8 +180,8 @@ impl OffsetCollector {
     }
 }
 
-#[allow(dead_code)]
 impl OffsetsSnapshot {
+    #[allow(dead_code)]
     pub fn filtered_groups(&self) -> Vec<&str> {
         self.groups.iter().map(|g| g.group_id.as_str()).collect()
     }
@@ -190,6 +190,7 @@ impl OffsetsSnapshot {
         self.watermarks.get(tp).copied()
     }
 
+    #[allow(dead_code)]
     pub fn get_high_watermark(&self, tp: &TopicPartition) -> Option<i64> {
         self.watermarks.get(tp).map(|(_, high)| *high)
     }

@@ -12,7 +12,6 @@ pub struct Config {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-#[allow(dead_code)]
 pub struct ExporterConfig {
     #[serde(with = "humantime_serde", default = "default_poll_interval")]
     pub poll_interval: Duration,
@@ -36,7 +35,6 @@ pub enum Granularity {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-#[allow(dead_code)]
 pub struct TimestampSamplingConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -57,7 +55,6 @@ pub struct OtelConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-#[allow(dead_code)]
 pub struct ClusterConfig {
     pub name: String,
     pub bootstrap_servers: String,

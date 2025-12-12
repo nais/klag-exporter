@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum MetricValue {
     Gauge(f64),
     Counter(f64),
@@ -28,7 +27,6 @@ pub struct MetricPoint {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum MetricType {
     Gauge,
     Counter,
@@ -67,18 +65,19 @@ impl MetricPoint {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct OtelMetric {
     pub name: String,
+    #[allow(dead_code)]
     pub description: String,
+    #[allow(dead_code)]
     pub unit: String,
     pub data_points: Vec<OtelDataPoint>,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct OtelDataPoint {
     pub attributes: HashMap<String, String>,
     pub value: f64,
+    #[allow(dead_code)]
     pub timestamp_ms: i64,
 }

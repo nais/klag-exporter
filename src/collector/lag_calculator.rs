@@ -3,8 +3,8 @@ use crate::kafka::client::TopicPartition;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct LagMetrics {
+    #[allow(dead_code)]
     pub cluster_name: String,
     pub partition_metrics: Vec<PartitionLagMetric>,
     pub group_metrics: Vec<GroupLagMetric>,
@@ -135,7 +135,7 @@ impl LagCalculator {
                         .map(|s| s.max(0.0))
                         // For retention-affected partitions without timestamp, still emit metric
                         // so it shows up in dashboards with retention_detected label
-                        .or_else(|| if retention_detected { Some(0.0) } else { None })
+                        .or(if retention_detected { Some(0.0) } else { None })
                 } else {
                     Some(0.0)
                 };
