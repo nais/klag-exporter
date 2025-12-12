@@ -814,7 +814,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "kafka_consumergroup_group_lag{cluster_name=~\"$cluster\", group=~\"$consumer_group\", topic=~\"$topic\"}",
+          "expr": "max by (group, topic, partition) (kafka_consumergroup_group_lag{cluster_name=~\"$cluster\", group=~\"$consumer_group\", topic=~\"$topic\"})",
           "legendFormat": "{{group}} - {{topic}}-{{partition}}",
           "refId": "A"
         }
@@ -906,7 +906,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "kafka_consumergroup_group_lag_seconds{cluster_name=~\"$cluster\", group=~\"$consumer_group\", topic=~\"$topic\"}",
+          "expr": "max by (group, topic, partition) (kafka_consumergroup_group_lag_seconds{cluster_name=~\"$cluster\", group=~\"$consumer_group\", topic=~\"$topic\"})",
           "legendFormat": "{{group}} - {{topic}}-{{partition}}",
           "refId": "A"
         }
@@ -1209,7 +1209,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "kafka_partition_latest_offset{cluster_name=~\"$cluster\", topic=~\"$topic\"}",
+          "expr": "max by (topic, partition) (kafka_partition_latest_offset{cluster_name=~\"$cluster\", topic=~\"$topic\"})",
           "legendFormat": "{{topic}}-{{partition}} (latest)",
           "refId": "A"
         },
@@ -1218,7 +1218,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "kafka_consumergroup_group_offset{cluster_name=~\"$cluster\", group=~\"$consumer_group\", topic=~\"$topic\"}",
+          "expr": "max by (group, topic, partition) (kafka_consumergroup_group_offset{cluster_name=~\"$cluster\", group=~\"$consumer_group\", topic=~\"$topic\"})",
           "legendFormat": "{{group}} {{topic}}-{{partition}} (committed)",
           "refId": "B"
         }
@@ -1310,7 +1310,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "rate(kafka_partition_latest_offset{cluster_name=~\"$cluster\", topic=~\"$topic\"}[1m])",
+          "expr": "max by (topic, partition) (rate(kafka_partition_latest_offset{cluster_name=~\"$cluster\", topic=~\"$topic\"}[1m]))",
           "legendFormat": "{{topic}}-{{partition}} (produce rate)",
           "refId": "A"
         },
@@ -1319,7 +1319,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "rate(kafka_consumergroup_group_offset{cluster_name=~\"$cluster\", group=~\"$consumer_group\", topic=~\"$topic\"}[1m])",
+          "expr": "max by (group, topic, partition) (rate(kafka_consumergroup_group_offset{cluster_name=~\"$cluster\", group=~\"$consumer_group\", topic=~\"$topic\"}[1m]))",
           "legendFormat": "{{group}} {{topic}}-{{partition}} (consume rate)",
           "refId": "B"
         }
