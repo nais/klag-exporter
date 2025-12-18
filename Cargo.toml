@@ -5,6 +5,13 @@ edition = "2021"
 description = "High-performance Kafka consumer group lag exporter with offset and time lag metrics"
 authors = ["Krzysztof Grajek"]
 license = "MIT"
+repository = "https://github.com/krzysztofgrajek/klag-exporter"
+homepage = "https://github.com/krzysztofgrajek/klag-exporter"
+documentation = "https://docs.rs/klag-exporter"
+readme = "README.md"
+keywords = ["kafka", "prometheus", "metrics", "lag", "exporter"]
+categories = ["development-tools::profiling"]
+exclude = ["test-stack/", "docs/", ".github/", ".claude/"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
