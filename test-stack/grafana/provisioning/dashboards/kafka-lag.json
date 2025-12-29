@@ -754,7 +754,7 @@
       },
       "id": 13,
       "panels": [],
-      "title": "Partition Offsets",
+      "title": "Throughput & Distribution",
       "type": "row"
     },
     {
@@ -842,20 +842,11 @@
             "uid": "${datasource}"
           },
           "expr": "max by (topic, partition) (kafka_partition_latest_offset{cluster_name=~\"$cluster\", topic=~\"$topic\"})",
-          "legendFormat": "{{topic}}-{{partition}} (latest)",
+          "legendFormat": "{{topic}}-{{partition}}",
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "max by (group, topic, partition) (kafka_consumergroup_group_offset{cluster_name=~\"$cluster\", group=~\"$consumer_group\", topic=~\"$topic\"})",
-          "legendFormat": "{{group}} {{topic}}-{{partition}} (committed)",
-          "refId": "B"
         }
       ],
-      "title": "Partition Offsets (Latest vs Committed)",
+      "title": "Partition Latest Offsets",
       "type": "timeseries"
     },
     {
@@ -942,8 +933,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max by (topic, partition) (rate(kafka_partition_latest_offset{cluster_name=~\"$cluster\", topic=~\"$topic\"}[1m]))",
-          "legendFormat": "{{topic}}-{{partition}} (produce rate)",
+          "expr": "sum by (topic) (rate(kafka_partition_latest_offset{cluster_name=~\"$cluster\", topic=~\"$topic\"}[1m]))",
+          "legendFormat": "{{topic}} (produced)",
           "refId": "A"
         },
         {
@@ -951,12 +942,12 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max by (group, topic, partition) (rate(kafka_consumergroup_group_offset{cluster_name=~\"$cluster\", group=~\"$consumer_group\", topic=~\"$topic\"}[1m]))",
-          "legendFormat": "{{group}} {{topic}}-{{partition}} (consume rate)",
+          "expr": "sum by (group, topic) (rate(kafka_consumergroup_group_offset{cluster_name=~\"$cluster\", group=~\"$consumer_group\", topic=~\"$topic\"}[1m]))",
+          "legendFormat": "{{group}} - {{topic}} (consumed)",
           "refId": "B"
         }
       ],
-      "title": "Message Rate (per second)",
+      "title": "Topic Message Rate (msg/sec)",
       "type": "timeseries"
     }
   ],
