@@ -25,6 +25,8 @@ pub struct ExporterConfig {
     pub timestamp_sampling: TimestampSamplingConfig,
     #[serde(default)]
     pub otel: OtelConfig,
+    #[serde(default)]
+    pub leadership: LeadershipConfig,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +54,41 @@ pub struct OtelConfig {
     pub endpoint: String,
     #[serde(with = "humantime_serde", default = "default_export_interval")]
     pub export_interval: Duration,
+}
+
+/// Configuration for leader election in high availability deployments.
+#[derive(Debug, Deserialize, Clone)]
+pub struct LeadershipConfig {
+    /// Enable leader election. When disabled (default), runs in single-instance mode.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Leadership provider type. Currently only "kubernetes" is supported.
+    #[serde(default = "default_leadership_provider")]
+    pub provider: LeadershipProvider,
+    /// Name of the Kubernetes Lease resource.
+    #[serde(default = "default_lease_name")]
+    pub lease_name: String,
+    /// Namespace for the Lease resource. Supports env var substitution.
+    #[serde(default = "default_lease_namespace")]
+    pub lease_namespace: String,
+    /// Identity of this instance. Defaults to HOSTNAME or POD_NAME env var.
+    #[allow(dead_code)] // Used by kubernetes feature
+    pub identity: Option<String>,
+    /// Duration the lease is valid in seconds.
+    #[serde(default = "default_lease_duration")]
+    #[allow(dead_code)] // Used by kubernetes feature
+    pub lease_duration_secs: u32,
+    /// Grace period for lease renewal in seconds. Must be less than lease_duration.
+    #[serde(default = "default_grace_period")]
+    #[allow(dead_code)] // Used by kubernetes feature
+    pub grace_period_secs: u32,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LeadershipProvider {
+    #[default]
+    Kubernetes,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -108,6 +145,26 @@ fn default_export_interval() -> Duration {
     Duration::from_secs(60)
 }
 
+fn default_leadership_provider() -> LeadershipProvider {
+    LeadershipProvider::Kubernetes
+}
+
+fn default_lease_name() -> String {
+    "klag-exporter".to_string()
+}
+
+fn default_lease_namespace() -> String {
+    "default".to_string()
+}
+
+fn default_lease_duration() -> u32 {
+    15
+}
+
+fn default_grace_period() -> u32 {
+    5
+}
+
 fn default_whitelist() -> Vec<String> {
     vec![".*".to_string()]
 }
@@ -132,6 +189,20 @@ impl Default for OtelConfig {
             enabled: false,
             endpoint: default_otel_endpoint(),
             export_interval: default_export_interval(),
+        }
+    }
+}
+
+impl Default for LeadershipConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_leadership_provider(),
+            lease_name: default_lease_name(),
+            lease_namespace: default_lease_namespace(),
+            identity: None,
+            lease_duration_secs: default_lease_duration(),
+            grace_period_secs: default_grace_period(),
         }
     }
 }

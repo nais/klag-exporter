@@ -25,6 +25,7 @@ A high-performance Apache Kafka® consumer group lag exporter written in Rust. C
 - **Custom Labels** — Add environment, datacenter, or any custom labels to all metrics
 - **Full Authentication Support** — SASL/PLAIN, SASL/SCRAM, SSL/TLS, and Kerberos via librdkafka
 - **Production Ready** — Health (`/health`) and readiness (`/ready`) endpoints for Kubernetes deployments
+- **High Availability** — Optional Kubernetes leader election for active-passive failover (see [HA Guide](docs/high-availability.md))
 - **Resource Efficient** — Written in Rust with async/await, minimal memory footprint, and bounded concurrency
 
 ## Why klag-exporter?
@@ -203,7 +204,8 @@ Use `${VAR_NAME}` syntax in config values. The exporter will substitute with env
 |----------|-------------|
 | `GET /metrics` | Prometheus metrics |
 | `GET /health` | Liveness probe (always 200 if running) |
-| `GET /ready` | Readiness probe (200 when metrics available) |
+| `GET /ready` | Readiness probe (200 when metrics available, 503 if standby in HA mode) |
+| `GET /leader` | Leadership status JSON (`{"is_leader": true/false}`) |
 | `GET /` | Basic info page |
 
 ## Architecture
@@ -254,6 +256,9 @@ cargo build
 # Release build (optimized)
 cargo build --release
 
+# Release build with High Availability support
+cargo build --release --features kubernetes
+
 # Run tests
 cargo test
 
@@ -268,6 +273,8 @@ docker build -t klag-exporter:latest .
 ```
 
 ## Kubernetes Deployment
+
+For high availability with automatic failover, see the [HA Guide](docs/high-availability.md). Below is a basic single-instance deployment:
 
 ```yaml
 apiVersion: apps/v1

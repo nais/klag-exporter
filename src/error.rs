@@ -31,6 +31,10 @@ pub enum KlagError {
 
     #[error("OpenTelemetry error: {0}")]
     Otel(String),
+
+    #[allow(dead_code)]
+    #[error("Leadership error: {0}")]
+    Leadership(String),
 }
 
 pub type Result<T> = std::result::Result<T, KlagError>;
