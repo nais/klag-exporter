@@ -157,7 +157,9 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn make_app_with_leadership(initial_state: LeadershipState) -> (Router, crate::leadership::LeadershipStateUpdater) {
+    fn make_app_with_leadership(
+        initial_state: LeadershipState,
+    ) -> (Router, crate::leadership::LeadershipStateUpdater) {
         let registry = Arc::new(MetricsRegistry::new());
         let prometheus = PrometheusExporter::new(Arc::clone(&registry));
         let (leadership, updater) = LeadershipStatus::new(initial_state);
@@ -267,7 +269,9 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["is_leader"], true);
     }
@@ -288,7 +292,9 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["is_leader"], false);
     }
