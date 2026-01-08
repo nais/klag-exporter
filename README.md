@@ -79,6 +79,23 @@ See [docs/compaction-detection.md](docs/compaction-detection.md) for detailed te
 
 ## Quick Start
 
+### Using Helm (Kubernetes)
+
+```bash
+# Install from OCI registry
+helm install klag-exporter oci://ghcr.io/softwaremill/helm/klag-exporter \
+  --set config.clusters[0].bootstrap_servers="kafka:9092" \
+  --set config.clusters[0].name="my-cluster" \
+  -n kafka --create-namespace
+
+# Or with custom values file
+helm install klag-exporter oci://ghcr.io/softwaremill/helm/klag-exporter \
+  -f values.yaml \
+  -n kafka --create-namespace
+```
+
+See [`helm/klag-exporter/Readme.md`](helm/klag-exporter/Readme.md) for detailed Helm chart documentation.
+
 ### Using Docker
 
 ```bash
