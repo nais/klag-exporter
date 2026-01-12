@@ -5,17 +5,21 @@ mod error;
 mod export;
 mod http;
 mod kafka;
+mod leadership;
 mod metrics;
 
 use crate::cluster::ClusterManager;
 use crate::config::Config;
 use crate::export::prometheus::PrometheusExporter;
 use crate::http::server::HttpServer;
+use crate::leadership::{LeadershipProvider, LeadershipStatus};
 use crate::metrics::registry::MetricsRegistry;
 use clap::Parser;
 use std::sync::Arc;
 use tokio::signal;
 use tokio::sync::broadcast;
+#[cfg(not(feature = "kubernetes"))]
+use tracing::warn;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -56,12 +60,28 @@ async fn main() -> anyhow::Result<()> {
     // Create shutdown channel
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
+    // Initialize leadership provider
+    let (leadership_provider, leadership_status) =
+        create_leadership_provider(&config.exporter.leadership).await?;
+
+    if config.exporter.leadership.enabled {
+        info!(
+            provider = ?config.exporter.leadership.provider,
+            lease_name = %config.exporter.leadership.lease_name,
+            namespace = %config.exporter.leadership.lease_namespace,
+            "Leader election enabled"
+        );
+    } else {
+        info!("Running in single-instance mode (leader election disabled)");
+    }
+
     // Spawn cluster managers
     let mut handles = Vec::new();
     for cluster_config in config.clusters.clone() {
         let registry = Arc::clone(&registry);
         let shutdown_rx = shutdown_tx.subscribe();
         let exporter_config = config.exporter.clone();
+        let leadership = leadership_status.clone();
 
         let handle = tokio::spawn(async move {
             let manager =
@@ -77,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
 
-            manager.run(shutdown_rx).await;
+            manager.run(shutdown_rx, leadership).await;
         });
 
         handles.push(handle);
@@ -90,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
         config.exporter.http_port,
         prometheus_exporter,
         Arc::clone(&registry),
+        leadership_status.clone(),
     );
 
     let shutdown_rx = shutdown_tx.subscribe();
@@ -135,8 +156,53 @@ async fn main() -> anyhow::Result<()> {
         Err(_) => error!("Timeout waiting for cluster managers to stop"),
     }
 
+    // Stop leadership provider
+    leadership_provider.stop().await;
+    info!("Leadership provider stopped");
+
     info!("klag-exporter stopped");
     Ok(())
+}
+
+/// Create the appropriate leadership provider based on configuration.
+async fn create_leadership_provider(
+    config: &crate::config::LeadershipConfig,
+) -> anyhow::Result<(Box<dyn LeadershipProvider>, LeadershipStatus)> {
+    if !config.enabled {
+        // Single-instance mode - use noop provider
+        let provider = leadership::noop::NoopLeader::new();
+        let status = provider.start().await?;
+        return Ok((Box::new(provider), status));
+    }
+
+    // Leader election enabled
+    match config.provider {
+        crate::config::LeadershipProvider::Kubernetes => {
+            #[cfg(feature = "kubernetes")]
+            {
+                let provider = leadership::kubernetes::create_kubernetes_leader(
+                    &config.lease_name,
+                    &config.lease_namespace,
+                    config.identity.as_deref(),
+                    Some(config.lease_duration_secs),
+                    Some(config.grace_period_secs),
+                )?;
+                let status = provider.start().await?;
+                Ok((Box::new(provider), status))
+            }
+            #[cfg(not(feature = "kubernetes"))]
+            {
+                warn!(
+                    "Kubernetes leadership is enabled in config but the 'kubernetes' feature is not compiled in. \
+                    Falling back to single-instance mode. \
+                    Rebuild with --features kubernetes to enable leader election."
+                );
+                let provider = leadership::noop::NoopLeader::new();
+                let status = provider.start().await?;
+                Ok((Box::new(provider), status))
+            }
+        }
+    }
 }
 
 fn init_logging(level: &str) {

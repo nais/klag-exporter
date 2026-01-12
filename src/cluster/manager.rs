@@ -5,6 +5,7 @@ use crate::config::{ClusterConfig, ExporterConfig, Granularity};
 use crate::error::Result;
 use crate::kafka::client::{KafkaClient, TopicPartition};
 use crate::kafka::TimestampConsumer;
+use crate::leadership::LeadershipStatus;
 use crate::metrics::registry::MetricsRegistry;
 use futures::future::join_all;
 use std::collections::{HashMap, HashSet};
@@ -87,18 +88,47 @@ impl ClusterManager {
         })
     }
 
-    #[instrument(skip(self, shutdown), fields(cluster = %self.cluster_name))]
-    pub async fn run(self, mut shutdown: broadcast::Receiver<()>) {
+    #[instrument(skip(self, shutdown, leadership), fields(cluster = %self.cluster_name))]
+    pub async fn run(self, mut shutdown: broadcast::Receiver<()>, leadership: LeadershipStatus) {
         info!(cluster = %self.cluster_name, "Starting collection loop");
 
         let mut interval = tokio::time::interval(self.poll_interval);
         let mut cache_cleanup_interval = tokio::time::interval(self.cache_cleanup_interval);
         let mut consecutive_errors = 0u32;
         let mut current_backoff = Duration::from_secs(1);
+        let mut was_leader = leadership.is_leader();
+
+        if !was_leader {
+            info!(
+                cluster = %self.cluster_name,
+                "Starting in standby mode - waiting for leadership"
+            );
+        }
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
+                    // Check leadership status before collecting
+                    let is_leader = leadership.is_leader();
+
+                    // Log leadership transitions
+                    if is_leader != was_leader {
+                        if is_leader {
+                            info!(cluster = %self.cluster_name, "Acquired leadership - starting collection");
+                        } else {
+                            info!(cluster = %self.cluster_name, "Lost leadership - pausing collection");
+                            // Clear metrics when losing leadership to avoid stale data
+                            self.registry.remove_cluster(&self.cluster_name);
+                        }
+                        was_leader = is_leader;
+                    }
+
+                    // Skip collection if not leader
+                    if !is_leader {
+                        debug!(cluster = %self.cluster_name, "Standby mode - skipping collection");
+                        continue;
+                    }
+
                     // Wrap collect_once with a timeout to prevent hangs
                     let collection_result = tokio::time::timeout(
                         self.collection_timeout,
@@ -150,18 +180,20 @@ impl ClusterManager {
                     }
                 }
                 _ = cache_cleanup_interval.tick() => {
-                    // Periodic cache cleanup
-                    if let Some(ref sampler) = self.timestamp_sampler {
-                        let before = sampler.cache_size();
-                        sampler.clear_stale_entries();
-                        let after = sampler.cache_size();
-                        if before != after {
-                            debug!(
-                                cluster = %self.cluster_name,
-                                before = before,
-                                after = after,
-                                "Cleaned up stale cache entries"
-                            );
+                    // Periodic cache cleanup (only if leader, to save resources)
+                    if leadership.is_leader() {
+                        if let Some(ref sampler) = self.timestamp_sampler {
+                            let before = sampler.cache_size();
+                            sampler.clear_stale_entries();
+                            let after = sampler.cache_size();
+                            if before != after {
+                                debug!(
+                                    cluster = %self.cluster_name,
+                                    before = before,
+                                    after = after,
+                                    "Cleaned up stale cache entries"
+                                );
+                            }
                         }
                     }
                 }
