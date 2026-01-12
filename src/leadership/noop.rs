@@ -52,8 +52,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_noop_leader_default() {
-        let provider = NoopLeader::default();
-        let status = provider.start().await.unwrap();
+        let status = NoopLeader.start().await.unwrap();
         assert!(status.is_leader());
     }
 }
