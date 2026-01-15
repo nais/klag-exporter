@@ -1,9 +1,8 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
+  release:
+    types: [created]
 
 env:
   CARGO_TERM_COLOR: always
@@ -11,22 +10,6 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # Publish to crates.io
-  publish-crates:
-    name: Publish to crates.io
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install dependencies
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list
-          sudo apt-get update
-          sudo apt-get install -y cmake libssl-dev libsasl2-dev pkg-config
-      - uses: Swatinem/rust-cache@v2
-      - name: Publish to crates.io
-        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
   # Build release binaries for multiple platforms
   build-binaries:
     name: Build ${{ matrix.target }}
@@ -73,28 +56,23 @@ jobs:
           name: ${{ matrix.asset_name }}
           path: ${{ matrix.asset_name }}.tar.gz
 
-  # Create GitHub Release with all binaries
-  release:
-    name: Create Release
+  # Upload binaries to GitHub Release
+  upload-binaries:
+    name: Upload Binaries to Release
     needs: build-binaries
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Create Release
+      - name: Upload binaries to release
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**/*.tar.gz
-          generate_release_notes: true
-          draft: false
-          prerelease: ${{ contains(github.ref, '-') }}
 
   # Build and push Docker image
   docker:
@@ -163,10 +141,10 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Extract version tag
+      - name: Extract version from tag
         id: version
         run: |
-          TAG=${GITHUB_REF#refs/tags/}
+          TAG=${{ github.event.release.tag_name }}
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "tag_without_v=${TAG#v}" >> $GITHUB_OUTPUT
 
