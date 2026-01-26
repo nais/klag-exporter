@@ -16,61 +16,82 @@ env:
 jobs:
   fmt:
     name: Format
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93
         with:
           components: rustfmt
       - run: cargo fmt --all --check
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
       - name: Install dependencies
         run: |
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list
           sudo apt-get update
           sudo apt-get install -y cmake build-essential libssl-dev libsasl2-dev zlib1g-dev libzstd-dev liblz4-dev pkg-config
+      - uses: dtolnay/rust-toolchain@1.93
+        with:
+          components: clippy
+      - name: Rust version
+        id: rust_version
+        run: echo "version=$(rustc --version | awk '{print $2}')" >> $GITHUB_OUTPUT
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ runner.os }}-cargo-${{ steps.rust_version.outputs.version }}-${{ github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
+          cache-targets: true
+          cache-on-failure: true
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
       - name: Install dependencies
         run: |
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list
           sudo apt-get update
           sudo apt-get install -y cmake build-essential libssl-dev libsasl2-dev zlib1g-dev libzstd-dev liblz4-dev pkg-config
+      - uses: dtolnay/rust-toolchain@1.93
+      - name: Rust version
+        id: rust_version
+        run: echo "version=$(rustc --version | awk '{print $2}')" >> $GITHUB_OUTPUT
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ runner.os }}-cargo-${{ steps.rust_version.outputs.version }}-${{ github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
+          cache-targets: true
+          cache-on-failure: true
       - run: cargo test --all-features
 
   build:
     name: Build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
       - name: Install dependencies
         run: |
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list
           sudo apt-get update
           sudo apt-get install -y cmake build-essential libssl-dev libsasl2-dev zlib1g-dev libzstd-dev liblz4-dev pkg-config
+      - uses: dtolnay/rust-toolchain@1.93
+      - name: Rust version
+        id: rust_version
+        run: echo "version=$(rustc --version | awk '{print $2}')" >> $GITHUB_OUTPUT
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ runner.os }}-cargo-${{ steps.rust_version.outputs.version }}-${{ github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
+          cache-targets: true
+          cache-on-failure: true
       - run: cargo build --release
 
   helm-chart-lint:
     name: Lint Helm Chart
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
