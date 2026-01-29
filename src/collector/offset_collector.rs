@@ -147,6 +147,11 @@ impl OffsetCollector {
             return Ok(HashMap::new());
         }
 
+        // Apply consumer properties first (security settings, etc.)
+        for (key, value) in self.client.consumer_properties() {
+            client_config.set(key, value);
+        }
+
         client_config
             .set("bootstrap.servers", bootstrap_servers.join(","))
             .set("group.id", group_id)
