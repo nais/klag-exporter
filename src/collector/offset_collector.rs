@@ -275,10 +275,8 @@ impl OffsetCollector {
             // Spawn async task that properly awaits the semaphore before spawning blocking work
             let handle = tokio::spawn(async move {
                 // Acquire permit - this properly awaits until one is available
-                let permit_guard: OwnedSemaphorePermit = permit
-                    .acquire_owned()
-                    .await
-                    .expect("semaphore closed");
+                let permit_guard: OwnedSemaphorePermit =
+                    permit.acquire_owned().await.expect("semaphore closed");
 
                 // Now spawn the blocking task with the permit held
                 tokio::task::spawn_blocking(move || {
