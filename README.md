@@ -230,6 +230,13 @@ enabled = false
 endpoint = "http://localhost:4317"
 export_interval = "60s"
 
+# Performance tuning for large clusters (optional)
+# [exporter.performance]
+# kafka_timeout = "30s"
+# offset_fetch_timeout = "10s"
+# max_concurrent_groups = 10
+# max_concurrent_watermarks = 50
+
 [[clusters]]
 name = "production"
 bootstrap_servers = "kafka1:9092,kafka2:9092"
@@ -474,6 +481,69 @@ To calculate accurate time lag, klag-exporter fetches messages from Kafka® at t
 - Disable timestamp sampling with `timestamp_sampling.enabled = false` — you'll still get offset lag metrics
 - Fetch size is limited to 256KB per partition to minimize data transfer
 - Run klag-exporter with minimal privileges and restricted network access
+
+## Large Cluster Configuration
+
+When monitoring large Kafka clusters with hundreds of consumer groups or thousands of partitions, the default settings may cause collection timeouts. The exporter includes performance tuning options to handle scale effectively.
+
+### Symptoms of Scale Issues
+
+- `Collection timed out` errors in logs
+- `Failed to fetch committed offsets` with `OperationTimedOut` errors
+- Collection cycles consistently exceeding the poll interval
+
+### Performance Tuning Options
+
+Add the `[exporter.performance]` section to tune parallelism and timeouts:
+
+```toml
+[exporter]
+poll_interval = "60s"  # Increase for large clusters
+
+[exporter.performance]
+# Timeout for individual Kafka API operations (metadata, watermarks)
+kafka_timeout = "15s"           # Default: 30s
+
+# Timeout for fetching committed offsets per consumer group
+offset_fetch_timeout = "5s"     # Default: 10s
+
+# Maximum consumer groups to fetch offsets for in parallel
+max_concurrent_groups = 20      # Default: 10
+
+# Maximum partitions to fetch watermarks for in parallel
+max_concurrent_watermarks = 100 # Default: 50
+```
+
+### Recommended Settings by Cluster Size
+
+| Cluster Size | Groups | Partitions | poll_interval | max_concurrent_groups | max_concurrent_watermarks |
+|--------------|--------|------------|---------------|----------------------|---------------------------|
+| Small        | < 50   | < 500      | 30s           | 10 (default)         | 50 (default)              |
+| Medium       | 50-200 | 500-2000   | 60s           | 20                   | 100                       |
+| Large        | > 200  | > 2000     | 120s          | 30                   | 200                       |
+
+### Additional Recommendations for Large Clusters
+
+1. **Use filters aggressively** — Narrow down to only the groups/topics you need:
+   ```toml
+   group_whitelist = ["^prod-.*"]
+   group_blacklist = ["^test-.*", "^dev-.*"]
+   topic_blacklist = ["__.*", ".*-dlq$"]
+   ```
+
+2. **Disable timestamp sampling if not needed** — Reduces broker load significantly:
+   ```toml
+   [exporter.timestamp_sampling]
+   enabled = false
+   ```
+
+3. **Use topic-level granularity** — Reduces metric cardinality:
+   ```toml
+   [exporter]
+   granularity = "topic"  # Instead of "partition"
+   ```
+
+4. **Consider running multiple instances** — Split monitoring across clusters or consumer group subsets using different whitelist patterns.
 
 ## Troubleshooting
 

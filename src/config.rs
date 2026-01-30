@@ -27,6 +27,8 @@ pub struct ExporterConfig {
     pub otel: OtelConfig,
     #[serde(default)]
     pub leadership: LeadershipConfig,
+    #[serde(default)]
+    pub performance: PerformanceConfig,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +46,24 @@ pub struct TimestampSamplingConfig {
     pub cache_ttl: Duration,
     #[serde(default = "default_max_concurrent_fetches")]
     pub max_concurrent_fetches: usize,
+}
+
+/// Performance tuning configuration for large clusters.
+/// These settings control parallelism and timeouts for Kafka operations.
+#[derive(Debug, Deserialize, Clone)]
+pub struct PerformanceConfig {
+    /// Timeout for individual Kafka API operations (metadata, watermarks, etc.)
+    #[serde(with = "humantime_serde", default = "default_kafka_timeout")]
+    pub kafka_timeout: Duration,
+    /// Timeout for fetching committed offsets per consumer group
+    #[serde(with = "humantime_serde", default = "default_offset_fetch_timeout")]
+    pub offset_fetch_timeout: Duration,
+    /// Maximum number of consumer groups to fetch offsets for in parallel
+    #[serde(default = "default_max_concurrent_groups")]
+    pub max_concurrent_groups: usize,
+    /// Maximum number of partitions to fetch watermarks for in parallel
+    #[serde(default = "default_max_concurrent_watermarks")]
+    pub max_concurrent_watermarks: usize,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -137,6 +157,22 @@ fn default_max_concurrent_fetches() -> usize {
     10
 }
 
+fn default_kafka_timeout() -> Duration {
+    Duration::from_secs(30)
+}
+
+fn default_offset_fetch_timeout() -> Duration {
+    Duration::from_secs(10)
+}
+
+fn default_max_concurrent_groups() -> usize {
+    10
+}
+
+fn default_max_concurrent_watermarks() -> usize {
+    50
+}
+
 fn default_otel_endpoint() -> String {
     "http://localhost:4317".to_string()
 }
@@ -203,6 +239,17 @@ impl Default for LeadershipConfig {
             identity: None,
             lease_duration_secs: default_lease_duration(),
             grace_period_secs: default_grace_period(),
+        }
+    }
+}
+
+impl Default for PerformanceConfig {
+    fn default() -> Self {
+        Self {
+            kafka_timeout: default_kafka_timeout(),
+            offset_fetch_timeout: default_offset_fetch_timeout(),
+            max_concurrent_groups: default_max_concurrent_groups(),
+            max_concurrent_watermarks: default_max_concurrent_watermarks(),
         }
     }
 }
@@ -502,5 +549,49 @@ bootstrap_servers = "localhost:9092"
         assert_eq!(config.exporter.granularity, Granularity::Topic);
         assert!(config.exporter.timestamp_sampling.enabled);
         assert!(!config.exporter.otel.enabled);
+        // Performance defaults
+        assert_eq!(
+            config.exporter.performance.kafka_timeout,
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            config.exporter.performance.offset_fetch_timeout,
+            Duration::from_secs(10)
+        );
+        assert_eq!(config.exporter.performance.max_concurrent_groups, 10);
+        assert_eq!(config.exporter.performance.max_concurrent_watermarks, 50);
+    }
+
+    #[test]
+    fn test_performance_config_custom_values() {
+        let config_content = r#"
+[exporter]
+poll_interval = "60s"
+
+[exporter.performance]
+kafka_timeout = "15s"
+offset_fetch_timeout = "5s"
+max_concurrent_groups = 20
+max_concurrent_watermarks = 100
+
+[[clusters]]
+name = "test"
+bootstrap_servers = "localhost:9092"
+"#;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(config_content.as_bytes()).unwrap();
+
+        let config = Config::load(Some(file.path().to_str().unwrap())).unwrap();
+        assert_eq!(
+            config.exporter.performance.kafka_timeout,
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            config.exporter.performance.offset_fetch_timeout,
+            Duration::from_secs(5)
+        );
+        assert_eq!(config.exporter.performance.max_concurrent_groups, 20);
+        assert_eq!(config.exporter.performance.max_concurrent_watermarks, 100);
     }
 }
