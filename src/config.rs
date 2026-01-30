@@ -300,6 +300,18 @@ impl Config {
             cluster.validate()?;
         }
 
+        // Validate performance config
+        if self.exporter.performance.max_concurrent_groups == 0 {
+            return Err(KlagError::Config(
+                "performance.max_concurrent_groups must be at least 1".to_string(),
+            ));
+        }
+        if self.exporter.performance.max_concurrent_watermarks == 0 {
+            return Err(KlagError::Config(
+                "performance.max_concurrent_watermarks must be at least 1".to_string(),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -593,5 +605,51 @@ bootstrap_servers = "localhost:9092"
         );
         assert_eq!(config.exporter.performance.max_concurrent_groups, 20);
         assert_eq!(config.exporter.performance.max_concurrent_watermarks, 100);
+    }
+
+    #[test]
+    fn test_performance_config_validates_zero_concurrency() {
+        let config_content = r#"
+[exporter]
+poll_interval = "30s"
+
+[exporter.performance]
+max_concurrent_groups = 0
+
+[[clusters]]
+name = "test"
+bootstrap_servers = "localhost:9092"
+"#;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(config_content.as_bytes()).unwrap();
+
+        let result = Config::load(Some(file.path().to_str().unwrap()));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("max_concurrent_groups must be at least 1"));
+    }
+
+    #[test]
+    fn test_performance_config_validates_zero_watermarks_concurrency() {
+        let config_content = r#"
+[exporter]
+poll_interval = "30s"
+
+[exporter.performance]
+max_concurrent_watermarks = 0
+
+[[clusters]]
+name = "test"
+bootstrap_servers = "localhost:9092"
+"#;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(config_content.as_bytes()).unwrap();
+
+        let result = Config::load(Some(file.path().to_str().unwrap()));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("max_concurrent_watermarks must be at least 1"));
     }
 }
