@@ -10,7 +10,7 @@ use rdkafka::TopicPartitionList;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, instrument, warn};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -126,6 +126,10 @@ impl KafkaClient {
 
     pub fn consumer_properties(&self) -> &HashMap<String, String> {
         &self.config.consumer_properties
+    }
+
+    pub fn bootstrap_servers(&self) -> &str {
+        &self.config.bootstrap_servers
     }
 
     #[instrument(skip(self), fields(cluster = %self.config.name))]
@@ -350,65 +354,77 @@ impl KafkaClient {
         let mut handles = Vec::with_capacity(partitions.len());
 
         for (topic, partition) in partitions {
-            let permit = semaphore.clone();
+            let semaphore_clone = semaphore.clone();
             let bootstrap = bootstrap_servers.clone();
             let props = consumer_properties.clone();
             let cluster = cluster_name.clone();
 
-            let handle = tokio::task::spawn_blocking(move || {
-                // Acquire permit - this blocks until one is available
-                let _permit = permit.try_acquire();
+            // Spawn async task that properly awaits the semaphore before spawning blocking work
+            let handle = tokio::spawn(async move {
+                // Acquire permit - this properly awaits until one is available
+                let permit: OwnedSemaphorePermit = semaphore_clone
+                    .acquire_owned()
+                    .await
+                    .expect("semaphore closed");
 
-                // Create a temporary consumer for this fetch
-                let mut client_config = ClientConfig::new();
-                client_config.set("bootstrap.servers", &bootstrap);
-                client_config.set(
-                    "client.id",
-                    format!("klag-wm-{}-{}-{}", cluster, topic, partition),
-                );
-                client_config.set("group.id", format!("klag-wm-internal-{}", cluster));
-                client_config.set("enable.auto.commit", "false");
+                // Now spawn the blocking task with the permit held
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit; // Hold permit until blocking work completes
 
-                for (key, value) in &props {
-                    client_config.set(key, value);
-                }
+                    // Create a temporary consumer for this fetch
+                    let mut client_config = ClientConfig::new();
+                    client_config.set("bootstrap.servers", &bootstrap);
+                    client_config.set(
+                        "client.id",
+                        format!("klag-wm-{}-{}-{}", cluster, topic, partition),
+                    );
+                    client_config.set("group.id", format!("klag-wm-internal-{}", cluster));
+                    client_config.set("enable.auto.commit", "false");
 
-                let consumer: BaseConsumer = match client_config.create() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        warn!(
-                            topic = topic,
-                            partition = partition,
-                            error = %e,
-                            "Failed to create consumer for watermark fetch"
-                        );
-                        return None;
+                    for (key, value) in &props {
+                        client_config.set(key, value);
                     }
-                };
 
-                match consumer.fetch_watermarks(&topic, partition, timeout) {
-                    Ok((low, high)) => Some((TopicPartition::new(&topic, partition), (low, high))),
-                    Err(e) => {
-                        warn!(
-                            topic = topic,
-                            partition = partition,
-                            error = %e,
-                            "Failed to fetch watermarks"
-                        );
-                        None
+                    let consumer: BaseConsumer = match client_config.create() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!(
+                                topic = topic,
+                                partition = partition,
+                                error = %e,
+                                "Failed to create consumer for watermark fetch"
+                            );
+                            return None;
+                        }
+                    };
+
+                    match consumer.fetch_watermarks(&topic, partition, timeout) {
+                        Ok((low, high)) => {
+                            Some((TopicPartition::new(&topic, partition), (low, high)))
+                        }
+                        Err(e) => {
+                            warn!(
+                                topic = topic,
+                                partition = partition,
+                                error = %e,
+                                "Failed to fetch watermarks"
+                            );
+                            None
+                        }
                     }
-                }
+                })
+                .await
             });
 
             handles.push(handle);
         }
 
-        // Wait for all tasks to complete
+        // Wait for all tasks to complete (nested Result from tokio::spawn -> spawn_blocking)
         let results = futures::future::join_all(handles).await;
 
         let mut watermarks = HashMap::new();
         for result in results {
-            if let Ok(Some((tp, wm))) = result {
+            if let Ok(Ok(Some((tp, wm)))) = result {
                 watermarks.insert(tp, wm);
             }
         }

@@ -4,7 +4,7 @@ use crate::kafka::client::{KafkaClient, TopicPartition};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, instrument, warn};
 
 pub struct OffsetCollector {
@@ -259,44 +259,62 @@ impl OffsetCollector {
         let semaphore = Arc::new(Semaphore::new(max_concurrent));
         let mut handles = Vec::with_capacity(descriptions.len());
 
+        // Get bootstrap servers once, not per-task
+        let bootstrap_servers = self.client.bootstrap_servers().to_string();
+        let consumer_properties = self.client.consumer_properties().clone();
+        let wm_keys: Vec<TopicPartition> = watermarks.keys().cloned().collect();
+
         for desc in descriptions {
             let group_id = desc.group_id.clone();
             let permit = semaphore.clone();
-            let bootstrap_servers = self.get_bootstrap_servers();
-            let consumer_properties = self.client.consumer_properties().clone();
-            let wm_keys: Vec<TopicPartition> = watermarks.keys().cloned().collect();
+            let bootstrap = bootstrap_servers.clone();
+            let props = consumer_properties.clone();
+            let partitions = wm_keys.clone();
             let timeout = offset_timeout;
 
-            let handle = tokio::task::spawn_blocking(move || {
-                // Acquire permit to limit concurrency
-                let _permit = permit.try_acquire();
+            // Spawn async task that properly awaits the semaphore before spawning blocking work
+            let handle = tokio::spawn(async move {
+                // Acquire permit - this properly awaits until one is available
+                let permit_guard: OwnedSemaphorePermit = permit
+                    .acquire_owned()
+                    .await
+                    .expect("semaphore closed");
 
-                let offsets = Self::fetch_group_offsets_standalone(
-                    &group_id,
-                    &bootstrap_servers,
-                    &consumer_properties,
-                    &wm_keys,
-                    timeout,
-                );
+                // Now spawn the blocking task with the permit held
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit_guard; // Hold permit until blocking work completes
 
-                (group_id, offsets)
+                    let offsets = Self::fetch_group_offsets_standalone(
+                        &group_id,
+                        &bootstrap,
+                        &props,
+                        &partitions,
+                        timeout,
+                    );
+
+                    (group_id, offsets)
+                })
+                .await
             });
 
             handles.push(handle);
         }
 
-        // Wait for all tasks to complete
+        // Wait for all tasks to complete (nested Result from tokio::spawn -> spawn_blocking)
         let results = futures::future::join_all(handles).await;
 
         let mut all_offsets = HashMap::new();
         for result in results {
             match result {
-                Ok((group_id, Ok(offsets))) => {
+                Ok(Ok((group_id, Ok(offsets)))) => {
                     all_offsets.insert(group_id, offsets);
                 }
-                Ok((group_id, Err(e))) => {
+                Ok(Ok((group_id, Err(e)))) => {
                     warn!(group = group_id, error = %e, "Failed to fetch group offsets");
                     all_offsets.insert(group_id, HashMap::new());
+                }
+                Ok(Err(e)) => {
+                    warn!(error = %e, "Group offset fetch blocking task panicked");
                 }
                 Err(e) => {
                     warn!(error = %e, "Group offset fetch task panicked");
@@ -305,26 +323,6 @@ impl OffsetCollector {
         }
 
         all_offsets
-    }
-
-    fn get_bootstrap_servers(&self) -> String {
-        // Get bootstrap servers from metadata if available, otherwise use config
-        match self.client.fetch_metadata() {
-            Ok(metadata) => {
-                let servers: Vec<String> = metadata
-                    .brokers()
-                    .iter()
-                    .map(|b| format!("{}:{}", b.host(), b.port()))
-                    .collect();
-                if servers.is_empty() {
-                    // Fallback - this shouldn't happen but just in case
-                    String::new()
-                } else {
-                    servers.join(",")
-                }
-            }
-            Err(_) => String::new(),
-        }
     }
 
     /// Standalone function to fetch group offsets (for use in spawn_blocking)
