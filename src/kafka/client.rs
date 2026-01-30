@@ -1,4 +1,4 @@
-use crate::config::ClusterConfig;
+use crate::config::{ClusterConfig, PerformanceConfig};
 use crate::error::{KlagError, Result};
 use rdkafka::admin::{AdminClient, AdminOptions, ResourceSpecifier};
 use rdkafka::client::DefaultClientContext;
@@ -8,7 +8,9 @@ use rdkafka::groups::GroupList;
 use rdkafka::metadata::Metadata;
 use rdkafka::TopicPartitionList;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, instrument, warn};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -66,11 +68,22 @@ pub struct KafkaClient {
     consumer: BaseConsumer,
     config: ClusterConfig,
     timeout: Duration,
+    performance: PerformanceConfig,
 }
 
 impl KafkaClient {
+    /// Create a new KafkaClient with default performance config.
+    /// Prefer `with_performance` for large clusters.
+    #[allow(dead_code)]
     pub fn new(config: &ClusterConfig) -> Result<Self> {
-        let timeout = Duration::from_secs(30);
+        Self::with_performance(config, PerformanceConfig::default())
+    }
+
+    pub fn with_performance(
+        config: &ClusterConfig,
+        performance: PerformanceConfig,
+    ) -> Result<Self> {
+        let timeout = performance.kafka_timeout;
 
         let mut client_config = ClientConfig::new();
         client_config.set("bootstrap.servers", &config.bootstrap_servers);
@@ -98,7 +111,13 @@ impl KafkaClient {
             consumer,
             config: config.clone(),
             timeout,
+            performance,
         })
+    }
+
+    #[allow(dead_code)]
+    pub fn performance(&self) -> &PerformanceConfig {
+        &self.performance
     }
 
     pub fn cluster_name(&self) -> &str {
@@ -107,6 +126,10 @@ impl KafkaClient {
 
     pub fn consumer_properties(&self) -> &HashMap<String, String> {
         &self.config.consumer_properties
+    }
+
+    pub fn bootstrap_servers(&self) -> &str {
+        &self.config.bootstrap_servers
     }
 
     #[instrument(skip(self), fields(cluster = %self.config.name))]
@@ -258,6 +281,9 @@ impl KafkaClient {
         Ok(offsets)
     }
 
+    /// Fetch watermarks sequentially (legacy method).
+    /// For large clusters, use `fetch_all_watermarks_parallel` instead.
+    #[allow(dead_code)]
     pub fn fetch_all_watermarks(&self) -> Result<HashMap<TopicPartition, (i64, i64)>> {
         let metadata = self.fetch_metadata()?;
         let mut watermarks = HashMap::new();
@@ -285,6 +311,130 @@ impl KafkaClient {
                 }
             }
         }
+
+        Ok(watermarks)
+    }
+
+    /// Fetch watermarks for all partitions in parallel with bounded concurrency.
+    /// This is more efficient for large clusters with many partitions.
+    #[instrument(skip(self), fields(cluster = %self.config.name))]
+    pub async fn fetch_all_watermarks_parallel(
+        &self,
+    ) -> Result<HashMap<TopicPartition, (i64, i64)>> {
+        let metadata = self.fetch_metadata()?;
+        let max_concurrent = self.performance.max_concurrent_watermarks;
+
+        // Collect all topic-partition pairs
+        let partitions: Vec<(String, i32)> = metadata
+            .topics()
+            .iter()
+            .flat_map(|topic| {
+                topic
+                    .partitions()
+                    .iter()
+                    .map(move |p| (topic.name().to_string(), p.id()))
+            })
+            .collect();
+
+        let total_partitions = partitions.len();
+        debug!(
+            cluster = %self.config.name,
+            partitions = total_partitions,
+            max_concurrent = max_concurrent,
+            "Fetching watermarks in parallel"
+        );
+
+        // Use semaphore to limit concurrency
+        let semaphore = Arc::new(Semaphore::new(max_concurrent));
+        let bootstrap_servers = self.config.bootstrap_servers.clone();
+        let consumer_properties = self.config.consumer_properties.clone();
+        let timeout = self.timeout;
+        let cluster_name = self.config.name.clone();
+
+        let mut handles = Vec::with_capacity(partitions.len());
+
+        for (topic, partition) in partitions {
+            let semaphore_clone = semaphore.clone();
+            let bootstrap = bootstrap_servers.clone();
+            let props = consumer_properties.clone();
+            let cluster = cluster_name.clone();
+
+            // Spawn async task that properly awaits the semaphore before spawning blocking work
+            let handle = tokio::spawn(async move {
+                // Acquire permit - this properly awaits until one is available
+                let permit: OwnedSemaphorePermit = semaphore_clone
+                    .acquire_owned()
+                    .await
+                    .expect("semaphore closed");
+
+                // Now spawn the blocking task with the permit held
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit; // Hold permit until blocking work completes
+
+                    // Create a temporary consumer for this fetch
+                    let mut client_config = ClientConfig::new();
+                    client_config.set("bootstrap.servers", &bootstrap);
+                    client_config.set(
+                        "client.id",
+                        format!("klag-wm-{}-{}-{}", cluster, topic, partition),
+                    );
+                    client_config.set("group.id", format!("klag-wm-internal-{}", cluster));
+                    client_config.set("enable.auto.commit", "false");
+
+                    for (key, value) in &props {
+                        client_config.set(key, value);
+                    }
+
+                    let consumer: BaseConsumer = match client_config.create() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!(
+                                topic = topic,
+                                partition = partition,
+                                error = %e,
+                                "Failed to create consumer for watermark fetch"
+                            );
+                            return None;
+                        }
+                    };
+
+                    match consumer.fetch_watermarks(&topic, partition, timeout) {
+                        Ok((low, high)) => {
+                            Some((TopicPartition::new(&topic, partition), (low, high)))
+                        }
+                        Err(e) => {
+                            warn!(
+                                topic = topic,
+                                partition = partition,
+                                error = %e,
+                                "Failed to fetch watermarks"
+                            );
+                            None
+                        }
+                    }
+                })
+                .await
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for all tasks to complete (nested Result from tokio::spawn -> spawn_blocking)
+        let results = futures::future::join_all(handles).await;
+
+        let mut watermarks = HashMap::new();
+        for result in results {
+            if let Ok(Ok(Some((tp, wm)))) = result {
+                watermarks.insert(tp, wm);
+            }
+        }
+
+        debug!(
+            cluster = %self.config.name,
+            fetched = watermarks.len(),
+            total = total_partitions,
+            "Parallel watermark fetch completed"
+        );
 
         Ok(watermarks)
     }

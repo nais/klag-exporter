@@ -1,13 +1,16 @@
-use crate::config::CompiledFilters;
+use crate::config::{CompiledFilters, PerformanceConfig};
 use crate::error::Result;
 use crate::kafka::client::{KafkaClient, TopicPartition};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, instrument, warn};
 
 pub struct OffsetCollector {
     client: Arc<KafkaClient>,
     filters: CompiledFilters,
+    performance: PerformanceConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -37,10 +40,33 @@ pub struct MemberSnapshot {
 }
 
 impl OffsetCollector {
+    /// Create a new OffsetCollector with default performance config.
+    /// Prefer `with_performance` for large clusters.
+    #[allow(dead_code)]
     pub fn new(client: Arc<KafkaClient>, filters: CompiledFilters) -> Self {
-        Self { client, filters }
+        let performance = client.performance().clone();
+        Self {
+            client,
+            filters,
+            performance,
+        }
     }
 
+    pub fn with_performance(
+        client: Arc<KafkaClient>,
+        filters: CompiledFilters,
+        performance: PerformanceConfig,
+    ) -> Self {
+        Self {
+            client,
+            filters,
+            performance,
+        }
+    }
+
+    /// Collect offsets sequentially (legacy method).
+    /// For large clusters, use `collect_parallel` instead.
+    #[allow(dead_code)]
     #[instrument(skip(self), fields(cluster = %self.client.cluster_name()))]
     pub fn collect(&self) -> Result<OffsetsSnapshot> {
         let start = std::time::Instant::now();
@@ -120,6 +146,246 @@ impl OffsetCollector {
         })
     }
 
+    /// Collect offsets with parallel watermark and group offset fetching.
+    /// This is more efficient for large clusters with many groups and partitions.
+    #[instrument(skip(self), fields(cluster = %self.client.cluster_name()))]
+    pub async fn collect_parallel(&self) -> Result<OffsetsSnapshot> {
+        let start = std::time::Instant::now();
+
+        // List all consumer groups (single call, cannot parallelize)
+        let all_groups = self.client.list_consumer_groups()?;
+        debug!(
+            total_groups = all_groups.len(),
+            "Listed all consumer groups"
+        );
+
+        // Filter groups
+        let filtered_groups: Vec<_> = all_groups
+            .iter()
+            .filter(|g| self.filters.matches_group(&g.group_id))
+            .collect();
+        debug!(
+            filtered_groups = filtered_groups.len(),
+            "Filtered consumer groups"
+        );
+
+        // Get group descriptions (still sequential as this is a metadata call)
+        let group_ids: Vec<&str> = filtered_groups
+            .iter()
+            .map(|g| g.group_id.as_str())
+            .collect();
+        let descriptions = self.client.describe_consumer_groups(&group_ids)?;
+
+        // Fetch watermarks in parallel
+        let watermarks = self.client.fetch_all_watermarks_parallel().await?;
+        debug!(
+            partitions = watermarks.len(),
+            "Fetched watermarks (parallel)"
+        );
+
+        // Fetch group offsets in parallel
+        let group_offsets = self
+            .fetch_all_group_offsets_parallel(&descriptions, &watermarks)
+            .await;
+
+        // Build group snapshots
+        let mut groups = Vec::with_capacity(descriptions.len());
+        for desc in descriptions {
+            let offsets = group_offsets
+                .get(&desc.group_id)
+                .cloned()
+                .unwrap_or_default();
+
+            // Filter offsets by topic whitelist/blacklist
+            let filtered_offsets: HashMap<TopicPartition, i64> = offsets
+                .into_iter()
+                .filter(|(tp, _)| self.filters.matches_topic(&tp.topic))
+                .collect();
+
+            let members = desc
+                .members
+                .into_iter()
+                .map(|m| MemberSnapshot {
+                    member_id: m.member_id,
+                    client_id: m.client_id,
+                    client_host: m.client_host,
+                    assignments: m.assignments,
+                })
+                .collect();
+
+            groups.push(GroupSnapshot {
+                group_id: desc.group_id,
+                state: desc.state,
+                members,
+                offsets: filtered_offsets,
+            });
+        }
+
+        // Filter watermarks by topic
+        let filtered_watermarks: HashMap<TopicPartition, (i64, i64)> = watermarks
+            .into_iter()
+            .filter(|(tp, _)| self.filters.matches_topic(&tp.topic))
+            .collect();
+
+        let elapsed = start.elapsed();
+        debug!(
+            elapsed_ms = elapsed.as_millis(),
+            "Parallel collection completed"
+        );
+
+        Ok(OffsetsSnapshot {
+            cluster_name: self.client.cluster_name().to_string(),
+            groups,
+            watermarks: filtered_watermarks,
+            timestamp_ms: chrono_timestamp_ms(),
+        })
+    }
+
+    /// Fetch offsets for all groups in parallel with bounded concurrency.
+    async fn fetch_all_group_offsets_parallel(
+        &self,
+        descriptions: &[crate::kafka::client::GroupDescription],
+        watermarks: &HashMap<TopicPartition, (i64, i64)>,
+    ) -> HashMap<String, HashMap<TopicPartition, i64>> {
+        let max_concurrent = self.performance.max_concurrent_groups;
+        let offset_timeout = self.performance.offset_fetch_timeout;
+
+        debug!(
+            groups = descriptions.len(),
+            max_concurrent = max_concurrent,
+            "Fetching group offsets in parallel"
+        );
+
+        let semaphore = Arc::new(Semaphore::new(max_concurrent));
+        let mut handles = Vec::with_capacity(descriptions.len());
+
+        // Get bootstrap servers once, not per-task
+        let bootstrap_servers = self.client.bootstrap_servers().to_string();
+        let consumer_properties = self.client.consumer_properties().clone();
+        let wm_keys: Vec<TopicPartition> = watermarks.keys().cloned().collect();
+
+        for desc in descriptions {
+            let group_id = desc.group_id.clone();
+            let permit = semaphore.clone();
+            let bootstrap = bootstrap_servers.clone();
+            let props = consumer_properties.clone();
+            let partitions = wm_keys.clone();
+            let timeout = offset_timeout;
+
+            // Spawn async task that properly awaits the semaphore before spawning blocking work
+            let handle = tokio::spawn(async move {
+                // Acquire permit - this properly awaits until one is available
+                let permit_guard: OwnedSemaphorePermit =
+                    permit.acquire_owned().await.expect("semaphore closed");
+
+                // Now spawn the blocking task with the permit held
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit_guard; // Hold permit until blocking work completes
+
+                    let offsets = Self::fetch_group_offsets_standalone(
+                        &group_id,
+                        &bootstrap,
+                        &props,
+                        &partitions,
+                        timeout,
+                    );
+
+                    (group_id, offsets)
+                })
+                .await
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for all tasks to complete (nested Result from tokio::spawn -> spawn_blocking)
+        let results = futures::future::join_all(handles).await;
+
+        let mut all_offsets = HashMap::new();
+        for result in results {
+            match result {
+                Ok(Ok((group_id, Ok(offsets)))) => {
+                    all_offsets.insert(group_id, offsets);
+                }
+                Ok(Ok((group_id, Err(e)))) => {
+                    warn!(group = group_id, error = %e, "Failed to fetch group offsets");
+                    all_offsets.insert(group_id, HashMap::new());
+                }
+                Ok(Err(e)) => {
+                    warn!(error = %e, "Group offset fetch blocking task panicked");
+                }
+                Err(e) => {
+                    warn!(error = %e, "Group offset fetch task panicked");
+                }
+            }
+        }
+
+        all_offsets
+    }
+
+    /// Standalone function to fetch group offsets (for use in spawn_blocking)
+    fn fetch_group_offsets_standalone(
+        group_id: &str,
+        bootstrap_servers: &str,
+        consumer_properties: &HashMap<String, String>,
+        watermark_partitions: &[TopicPartition],
+        timeout: Duration,
+    ) -> Result<HashMap<TopicPartition, i64>> {
+        use rdkafka::config::ClientConfig;
+        use rdkafka::consumer::{BaseConsumer, Consumer};
+        use rdkafka::TopicPartitionList;
+
+        if bootstrap_servers.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut client_config = ClientConfig::new();
+
+        // Apply consumer properties first (security settings, etc.)
+        for (key, value) in consumer_properties {
+            client_config.set(key, value);
+        }
+
+        client_config
+            .set("bootstrap.servers", bootstrap_servers)
+            .set("group.id", group_id)
+            .set("enable.auto.commit", "false");
+
+        let consumer: BaseConsumer = match client_config.create() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(group = group_id, error = %e, "Failed to create consumer for group");
+                return Ok(HashMap::new());
+            }
+        };
+
+        // Build topic partition list from watermarks
+        let mut tpl = TopicPartitionList::new();
+        for tp in watermark_partitions {
+            tpl.add_partition(&tp.topic, tp.partition);
+        }
+
+        // Fetch committed offsets
+        let committed = match consumer.committed_offsets(tpl, timeout) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(group = group_id, error = %e, "Failed to fetch committed offsets");
+                return Ok(HashMap::new());
+            }
+        };
+
+        let mut offsets = HashMap::new();
+        for elem in committed.elements() {
+            if let rdkafka::Offset::Offset(offset) = elem.offset() {
+                offsets.insert(TopicPartition::new(elem.topic(), elem.partition()), offset);
+            }
+        }
+
+        Ok(offsets)
+    }
+
+    /// Fetch offsets for a single group (used by sequential collect method).
+    #[allow(dead_code)]
     fn fetch_group_offsets(
         &self,
         group_id: &str,

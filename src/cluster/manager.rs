@@ -11,7 +11,7 @@ use futures::future::join_all;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, Semaphore};
+use tokio::sync::{broadcast, OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, error, info, instrument, warn};
 
 /// Default timeout for a single collection cycle (should be less than poll_interval)
@@ -41,9 +41,11 @@ impl ClusterManager {
         let cluster_name = config.name.clone();
         let cluster_labels = config.labels.clone();
         let filters = config.compile_filters()?;
+        let performance = exporter_config.performance.clone();
 
-        let client = Arc::new(KafkaClient::new(&config)?);
-        let offset_collector = OffsetCollector::new(Arc::clone(&client), filters);
+        let client = Arc::new(KafkaClient::with_performance(&config, performance.clone())?);
+        let offset_collector =
+            OffsetCollector::with_performance(Arc::clone(&client), filters, performance.clone());
 
         let timestamp_sampler = if exporter_config.timestamp_sampling.enabled {
             let ts_consumer = TimestampConsumer::new(&config)?;
@@ -213,8 +215,8 @@ impl ClusterManager {
     async fn collect_once(&self) -> Result<()> {
         let start = Instant::now();
 
-        // Collect offsets
-        let snapshot = tokio::task::block_in_place(|| self.offset_collector.collect())?;
+        // Collect offsets using parallel method for better performance with large clusters
+        let snapshot = self.offset_collector.collect_parallel().await?;
 
         debug!(
             cluster = %self.cluster_name,
@@ -323,17 +325,28 @@ impl ClusterManager {
         let semaphore = Arc::new(Semaphore::new(self.max_concurrent_fetches));
         let mut handles = Vec::with_capacity(requests.len());
 
-        // Spawn all tasks in parallel
+        // Spawn tasks with proper semaphore-based backpressure
         for (group_id, tp, offset) in requests {
-            let permit = semaphore.clone();
+            let semaphore_clone = semaphore.clone();
             let sampler_clone = sampler.clone();
 
-            // Spawn a blocking task for each timestamp fetch
-            let handle = tokio::task::spawn_blocking(move || {
-                // Acquire permit inside the blocking task to limit concurrency
-                let _permit = permit.try_acquire();
-                let result = sampler_clone.get_timestamp(&group_id, &tp, offset);
-                ((group_id, tp), result)
+            // Spawn an async task that properly acquires the semaphore before spawning blocking work
+            let handle = tokio::spawn(async move {
+                // Acquire permit - this properly awaits until one is available
+                let permit: OwnedSemaphorePermit = semaphore_clone
+                    .acquire_owned()
+                    .await
+                    .expect("semaphore closed");
+
+                // Now spawn the blocking task with the permit held
+                let result = tokio::task::spawn_blocking(move || {
+                    let _permit = permit; // Hold permit until blocking work completes
+                    let result = sampler_clone.get_timestamp(&group_id, &tp, offset);
+                    ((group_id, tp), result)
+                })
+                .await;
+
+                result
             });
 
             handles.push(handle);
@@ -342,11 +355,11 @@ impl ClusterManager {
         // Wait for all tasks to complete in parallel
         let results = join_all(handles).await;
 
-        // Collect results
+        // Collect results (nested Result from tokio::spawn -> spawn_blocking)
         let mut timestamps = HashMap::new();
         for result in results {
             match result {
-                Ok(((group_id, tp), Ok(Some(ts_result)))) => {
+                Ok(Ok(((group_id, tp), Ok(Some(ts_result))))) => {
                     timestamps.insert(
                         (group_id, tp),
                         TimestampData {
@@ -354,7 +367,7 @@ impl ClusterManager {
                         },
                     );
                 }
-                Ok(((group_id, tp), Ok(None))) => {
+                Ok(Ok(((group_id, tp), Ok(None)))) => {
                     debug!(
                         group = group_id,
                         topic = tp.topic,
@@ -362,7 +375,7 @@ impl ClusterManager {
                         "No timestamp available"
                     );
                 }
-                Ok(((group_id, tp), Err(e))) => {
+                Ok(Ok(((group_id, tp), Err(e)))) => {
                     warn!(
                         group = group_id,
                         topic = tp.topic,
@@ -370,6 +383,9 @@ impl ClusterManager {
                         error = %e,
                         "Failed to fetch timestamp"
                     );
+                }
+                Ok(Err(e)) => {
+                    warn!(error = %e, "Timestamp fetch blocking task panicked");
                 }
                 Err(e) => {
                     warn!(error = %e, "Timestamp fetch task panicked");
