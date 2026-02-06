@@ -1,0 +1,186 @@
+services:
+  # Kafka cluster using KRaft (no Zookeeper)
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    hostname: kafka
+    container_name: lc-kafka
+    ports:
+      - "9192:9092"
+      - "9193:9093"
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+    environment:
+      KAFKA_HEAP_OPTS: "-Xmx2g -Xms2g"
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9192
+      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_NUM_PARTITIONS: 3
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "kafka:29092", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - lc-klag-network
+
+  # Topic creator - runs once then exits
+  topic-creator:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: lc-topic-creator
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/scripts:ro
+    environment:
+      NUM_TOPICS: ${NUM_TOPICS:-500}
+      PARTITIONS_PER_TOPIC: ${PARTITIONS_PER_TOPIC:-3}
+    entrypoint: ["/bin/bash", "/scripts/create-topics.sh"]
+    networks:
+      - lc-klag-network
+
+  # klag-exporter with configurable ulimit
+  klag-exporter:
+    build:
+      context: ..
+      dockerfile: Dockerfile.dev
+    container_name: lc-klag-exporter
+    ports:
+      - "8100:8000"
+    ulimits:
+      nofile:
+        soft: ${KLAG_NOFILE_LIMIT:-256}
+        hard: ${KLAG_NOFILE_LIMIT:-256}
+    volumes:
+      - ./klag-config.toml:/app/config.toml:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - lc-klag-network
+
+  # Producer - writes to all topics continuously
+  producer:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: lc-producer
+    depends_on:
+      topic-creator:
+        condition: service_completed_successfully
+    volumes:
+      - ./scripts:/scripts:ro
+    environment:
+      NUM_TOPICS: ${NUM_TOPICS:-500}
+    entrypoint: ["/bin/bash", "/scripts/producer.sh"]
+    networks:
+      - lc-klag-network
+
+  # Consumer - creates multiple consumer groups with lag
+  consumer:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: lc-consumer
+    depends_on:
+      topic-creator:
+        condition: service_completed_successfully
+    volumes:
+      - ./scripts:/scripts:ro
+    environment:
+      NUM_TOPICS: ${NUM_TOPICS:-500}
+      NUM_CONSUMER_GROUPS: ${NUM_CONSUMER_GROUPS:-10}
+    entrypoint: ["/bin/bash", "/scripts/consumer.sh"]
+    networks:
+      - lc-klag-network
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: lc-prometheus
+    ports:
+      - "9190:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - lc-prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    depends_on:
+      - klag-exporter
+    networks:
+      - lc-klag-network
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: lc-grafana
+    ports:
+      - "3100:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - lc-grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - lc-klag-network
+
+  # OpenTelemetry Collector
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.91.0
+    container_name: lc-otel-collector
+    ports:
+      - "4417:4317"
+      - "4418:4318"
+      - "8988:8888"
+      - "8989:8889"
+    volumes:
+      - ./otel/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    networks:
+      - lc-klag-network
+
+  # Kafka UI for debugging
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: lc-kafka-ui
+    ports:
+      - "8180:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: large-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - lc-klag-network
+
+volumes:
+  lc-prometheus-data:
+  lc-grafana-data:
+
+networks:
+  lc-klag-network:
+    driver: bridge
