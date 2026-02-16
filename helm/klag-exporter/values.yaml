@@ -119,6 +119,7 @@ readinessProbe:
     path: /ready
     port: http
 
+log_level: "info"
 config:
   exporter:
     poll_interval: "30s"
