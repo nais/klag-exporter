@@ -1,6 +1,8 @@
 apiVersion: v2
 name: klag-exporter
 description: A Helm chart for Kubernetes
+sources:
+  - https://github.com/nais/klag-exporter/tree/main/deploy_our_own_helmchart/helm/klag-exporter
 
 type: application
 
