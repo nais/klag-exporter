@@ -14,6 +14,14 @@ data:
     granularity = {{ .granularity | quote }}
     {{- end }}
 
+    [exporter.performance]
+    {{- with index .Values.config "exporter.performance" }}
+    kafka_timeout = {{ .kafka_timeout | quote }}
+    offset_fetch_timeout = {{ .offset_fetch_timeout | quote }}
+    max_concurrent_groups = {{ .max_concurrent_groups }}
+    max_concurrent_watermarks = {{ .max_concurrent_watermarks }}
+    {{- end }}
+
     [exporter.timestamp_sampling]
     {{- with index .Values.config "exporter.timestamp_sampling" }}
     enabled = {{ .enabled }}
