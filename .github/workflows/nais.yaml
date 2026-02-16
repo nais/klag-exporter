@@ -30,6 +30,10 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v3
 
+      - uses: DeterminateSystems/magic-nix-cache-action@c6a5746789488c8753af0d61fc6b5d79a80391f3 # was: DeterminateSystems/magic-nix-cache-action@main
+        with:
+          use-flakehub: disabled
+
       - name: Build Containers
         id: build-containers
         shell: bash
