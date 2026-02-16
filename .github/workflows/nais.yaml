@@ -45,7 +45,7 @@ jobs:
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.NAIS_IO_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: gh-aivenator@nais-io.iam.gserviceaccount.com
+          service_account: gh-klag-exporter@nais-io.iam.gserviceaccount.com
           token_format: access_token
 
       - name: "Handle auth failure"
