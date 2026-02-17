@@ -119,8 +119,14 @@ jobs:
         run: |-
           helm package "./helm/klag-exporter"
       - name: Push Chart
-        if: github.ref == 'refs/heads/main'
+        # if: github.ref == 'refs/heads/main'
         run: |-
           for chart in *.tgz; do
             helm push "$chart" oci://${{ env.GOOGLE_REGISTRY }}/nais-io/nais/feature
           done
+
+      - uses: nais/fasit-deploy@8727ed1c7a5a465e837873e6016a9a692a6b874a # ratchet:nais/fasit-deploy@v2
+        # if: github.ref == 'refs/heads/main'
+        with:
+          chart: oci://${{ env.GOOGLE_REGISTRY }}/nais-io/nais/feature/${{ env.NAME }}
+          version: ${{ needs.build.outputs.version }}
