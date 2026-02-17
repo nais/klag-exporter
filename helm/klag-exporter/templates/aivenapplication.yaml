@@ -1,0 +1,11 @@
+apiVersion: aiven.nais.io/v1
+kind: AivenApplication
+metadata:
+  name: {{ include "klag-exporter.name" . }}
+  labels:
+    {{- include "klag-exporter.labels" . | nindent 4 }}
+spec:
+  kafka:
+    pool: {{ (index .Values "config" "clusters" 0 "name") }}
+    secretName: {{ (index .Values "customSecretVolumes" 0 "secretName") }}
+  protected: true
