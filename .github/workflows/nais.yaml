@@ -79,16 +79,6 @@ jobs:
           docker tag "europe-north1-docker.pkg.dev/nais-io/nais/images/${{env.NAME}}:${{ steps.version.outputs.version }}" "europe-north1-docker.pkg.dev/nais-io/nais/images/${{env.NAME}}:latest"
           docker push europe-north1-docker.pkg.dev/nais-io/nais/images/${{env.NAME}}:latest
 
-      - name: Install nix2sbom
-        uses: EricCrosson/install-github-release-binary@681cc3de7c5c5ac935b1a2a19e4e0c577c4d3027 # v2.3.4
-        with:
-          targets: louib/nix2sbom/nix2sbom@v2.4.5
-
-      - name: Generate the SPDX manifest
-        run: |
-          nix2sbom .#  > sbom.json
-          cat sbom.json
-
     outputs:
       version: "${{ steps.version.outputs.version }}"
 
