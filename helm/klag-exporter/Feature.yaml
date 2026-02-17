@@ -1,0 +1,69 @@
+dependencies:
+  - allOf:
+      - aivenator
+      - nais-crds
+      - monitoring
+
+environmentKinds:
+  - tenant
+
+values:
+  log_level:
+    displayName: log_level
+    description: String sent to `RUST_LOG` env-var
+    config:
+      type: string
+
+  config.exporter.exporter.poll_interval:
+    displayName: poll_interval
+    description: Client-side kafka poll interval
+    config:
+      type: string
+  config.exporter.exporter.timestamp_sampling.enabled:
+    displayName: timestamp_sampling.enabled
+    description: Enable (resource intensive!!!) metrics based on timestamp calculations
+    config:
+      type: bool
+
+  config.exporter.exporter.performance.kafka_timeout:
+    displayName: kafka_timeout
+    description: Client-side kafka timeout
+    config:
+      type: string
+  config.exporter.exporter.performance.offset_fetch_timeout:
+    displayName: offset_fetch_timeout
+    description: Client-side kafka offset fetch timeout
+    config:
+      type: string
+  config.exporter.exporter.performance.max_concurrent_groups:
+    displayName: max_concurrent_groups
+    description: Max concurrent groups processed per fetch
+    config:
+      type: int
+  config.exporter.exporter.performance.max_concurrent_watermarks:
+    displayName: max_concurrent_watermarks
+    description: "Max concurrent watermarks (read: topics) per fetch"
+    config:
+      type: int
+
+  config.clusters:
+    computed:
+      template: |
+        - name: "{{ .Env.aiven_project }}"
+          bootstrap_servers: "{{ .Env.kafka_bootstrap_broker }}"
+          group_whitelist: [".*"] # Allow every group
+          group_blacklist: [] # Blacklist no group
+          topic_whitelist: [".*"] # Allow every topic
+          topic_blacklist: ["^__.*"] # Exclude internal topics like __consumer_offsets
+          clusters.consumer_properties:
+            security.protocol: "SSL"
+            ssl.ca.location: "/var/run/secrets/nais.io/aiven-credentials/KAFKA_CA"
+            ssl.certificate.location: "/var/run/secrets/nais.io/aiven-credentials/KAFKA_CERTIFICATE"
+            ssl.key.location: "/var/run/secrets/nais.io/aiven-credentials/KAFKA_PRIVATE_KEY"
+  customSecretVolumes:
+    computed:
+      template: |
+        - name: aiven-secrets
+          secretName: klag-exporter-credentials-{{ now | date "2006-01" }}
+          mountPath: "/var/run/secrets/nais.io/aiven-credentials"
+          readOnly: true
