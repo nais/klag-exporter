@@ -64,10 +64,19 @@ jobs:
           username: "oauth2accesstoken"
           password: "${{ steps.auth.outputs.access_token }}"
 
+      - name: Get version number
+        id: version
+        run: |
+          echo "version=$(nix eval .#docker.drvAttrs.imageTag | jq -r)" >> $GITHUB_OUTPUT
+
       - name: Push image to registry
         id: push
         shell: bash
         run: |
+          docker tag "${{ env.NAME }}:${{ steps.version.outputs.version }}" "europe-north1-docker.pkg.dev/nais-io/nais/images/${{env.NAME}}:${{ steps.version.outputs.version }}"
+          docker push europe-north1-docker.pkg.dev/nais-io/nais/images/${{env.NAME}}:${{ steps.version.outputs.version }}
+
+          docker tag "europe-north1-docker.pkg.dev/nais-io/nais/images/${{env.NAME}}:${{ steps.version.outputs.version }}" "europe-north1-docker.pkg.dev/nais-io/nais/images/${{env.NAME}}:latest"
           docker push europe-north1-docker.pkg.dev/nais-io/nais/images/${{env.NAME}}:latest
 
       - name: Install nix2sbom
@@ -80,10 +89,6 @@ jobs:
           nix2sbom .#  > sbom.json
           cat sbom.json
 
-      - name: Get version number
-        id: version
-        run: |
-          echo "version=$(nix eval .#docker.drvAttrs.imageTag | jq -r)" >> $GITHUB_OUTPUT
     outputs:
       version: "${{ steps.version.outputs.version }}"
 
