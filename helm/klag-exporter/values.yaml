@@ -130,12 +130,12 @@ readinessProbe:
 log_level: "info"
 config:
   exporter:
-    poll_interval: "30s"
+    poll_interval: "60s"
     http_port: 8000
     http_host: "0.0.0.0"
-    granularity: "topic"
+    granularity: "partition"
   exporter.timestamp_sampling:
-    enabled: true
+    enabled: false
     cache_ttl: "60s"
     max_concurrent_fetches: 10
   exporter.otel:
@@ -143,10 +143,10 @@ config:
     endpoint: "http://localhost:4317"
     export_interval: "60s"
   exporter.performance:
-    kafka_timeout: "30s"
-    offset_fetch_timeout: "10s"
-    max_concurrent_groups: 10
-    max_concurrent_watermarks: 50
+    kafka_timeout: "45s"
+    offset_fetch_timeout: "30s"
+    max_concurrent_groups: 20
+    max_concurrent_watermarks: 75
   clusters:
     - name: "cluster-1"
       bootstrap_servers: "kafka:9092"
