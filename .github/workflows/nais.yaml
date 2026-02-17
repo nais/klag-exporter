@@ -21,6 +21,8 @@ jobs:
       contents: read
       packages: write
       id-token: write
+    outputs:
+      version: "${{ steps.version.outputs.version }}"
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -79,8 +81,6 @@ jobs:
           docker tag "europe-north1-docker.pkg.dev/nais-io/nais/images/${{env.NAME}}:${{ steps.version.outputs.version }}" "europe-north1-docker.pkg.dev/nais-io/nais/images/${{env.NAME}}:latest"
           docker push europe-north1-docker.pkg.dev/nais-io/nais/images/${{env.NAME}}:latest
 
-    outputs:
-      version: "${{ steps.version.outputs.version }}"
 
   chart:
     name: Build and push chart
@@ -125,6 +125,15 @@ jobs:
             helm push "$chart" oci://${{ env.GOOGLE_REGISTRY }}/nais-io/nais/feature
           done
 
+  fasit-deploy:
+    name: Deploy helm-chart to fasit
+    permissions:
+      id-token: "write"
+    runs-on: fasit-deploy
+    needs:
+      - chart
+      - build
+    steps:
       - uses: nais/fasit-deploy@8727ed1c7a5a465e837873e6016a9a692a6b874a # ratchet:nais/fasit-deploy@v2
         # if: github.ref == 'refs/heads/main'
         with:
