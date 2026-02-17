@@ -75,11 +75,14 @@
           programs.rustfmt.enable = true;
         };
         packages.default = rust-prog;
-        packages.docker = pkgs.dockerTools.buildImage {
+        packages.docker = pkgs.dockerTools.buildImage rec {
           inherit name tag;
+          uid = 6969;
+          gid = 6969;
           config = {
             Expose = "8000";
             Workdir = "/app";
+            User = "${lib.toString uid}:${lib.toString gid}";
 
             Entrypoint = [ (lib.getExe rust-prog) ];
             Cmd = [
