@@ -27,7 +27,10 @@ podAnnotations: {}
 # This is for setting Kubernetes Labels to a Pod.
 # For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/
 podLabels:
+  app: klag-exporter
   aiven: enabled
+  kafka: enabled
+  team: nais
 
 podSecurityContext:
   runAsNonRoot: true
@@ -198,9 +201,10 @@ tolerations: []
 affinity: {}
 
 serviceMonitor:
-  enabled: false
+  enabled: true
   # Additional cconfig for endpoint
   additionalEndpointConfig: {}
 
 labels:
   app: klag-exporter
+  team: nais
