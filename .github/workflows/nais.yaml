@@ -112,7 +112,7 @@ jobs:
           version: "3.8.0"
       - name: Set versions
         run: |-
-          yq e '.image.tag = "${{ needs.build.outputs.version }}"' --inplace "./helm/${{env.name}}/values.yaml"
+          yq e '.image.tag = "${{ needs.build.outputs.version }}"' --inplace "./helm/${{ env.NAME }}/values.yaml"
       - name: Build Chart
         run: |-
           helm package "./helm/klag-exporter"
