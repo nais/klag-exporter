@@ -8,7 +8,7 @@ image:
 imagePullSecrets: []
 # This is to override the chart name.
 nameOverride: ""
-fullnameOverride: ""
+fullnameOverride: "klag-exporter"
 
 serviceAccount:
   # Specifies whether a service account should be created.
