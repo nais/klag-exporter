@@ -90,6 +90,8 @@ values:
         failureThreshold: 12
 
   config.clusters:
+    config:
+      type: string
     computed:
       template: |
         - name: "{{ .Env.aiven_project }}"
