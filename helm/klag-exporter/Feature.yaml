@@ -58,6 +58,32 @@ values:
     config:
       type: int
 
+  livenessProbe:
+    displayName: liveness_probe
+    description: Kubernetes liveness probe configuration
+    computed:
+      template: |
+        httpGet:
+          path: /health
+          port: http
+        initialDelaySeconds: 60
+        periodSeconds: 20
+        timeoutSeconds: 2
+        failureThreshold: 3
+
+  readinessProbe:
+    displayName: readiness_probe
+    description: Kubernetes readiness probe configuration
+    computed:
+      template: |
+        httpGet:
+          path: /ready
+          port: http
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 2
+        failureThreshold: 12
+
   config.clusters:
     computed:
       template: |
