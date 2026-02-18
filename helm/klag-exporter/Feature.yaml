@@ -63,31 +63,53 @@ values:
     config:
       type: string_array
 
-  livenessProbe:
-    displayName: liveness_probe
-    description: Kubernetes liveness probe configuration
-    computed:
-      template: |
-        httpGet:
-          path: /health
-          port: http
-        initialDelaySeconds: 60
-        periodSeconds: 20
-        timeoutSeconds: 2
-        failureThreshold: 3
+  livenessProbe.initialDelaySeconds:
+    displayName: livenessProbe_initialDelaySeconds
+    description: Initial delay in seconds for liveness probe
+    config:
+      type: int
 
-  readinessProbe:
-    displayName: readiness_probe
-    description: Kubernetes readiness probe configuration
-    computed:
-      template: |
-        httpGet:
-          path: /ready
-          port: http
-        initialDelaySeconds: 10
-        periodSeconds: 10
-        timeoutSeconds: 2
-        failureThreshold: 12
+  livenessProbe.periodSeconds:
+    displayName: livenessProbe_periodSeconds
+    description: Period in seconds for liveness probe checks
+    config:
+      type: int
+
+  livenessProbe.timeoutSeconds:
+    displayName: livenessProbe_timeoutSeconds
+    description: Timeout in seconds for liveness probe
+    config:
+      type: int
+
+  livenessProbe.failureThreshold:
+    displayName: livenessProbe_failureThreshold
+    description: Failure threshold for liveness probe
+    config:
+      type: int
+
+  readinessProbe.initialDelaySeconds:
+    displayName: readinessProbe_initialDelaySeconds
+    description: Initial delay in seconds for readiness probe
+    config:
+      type: int
+
+  readinessProbe.periodSeconds:
+    displayName: readinessProbe_periodSeconds
+    description: Period in seconds for readiness probe checks
+    config:
+      type: int
+
+  readinessProbe.timeoutSeconds:
+    displayName: readinessProbe_timeoutSeconds
+    description: Timeout in seconds for readiness probe
+    config:
+      type: int
+
+  readinessProbe.failureThreshold:
+    displayName: readinessProbe_failureThreshold
+    description: Failure threshold for readiness probe
+    config:
+      type: int
 
   config.clusters:
     config:
