@@ -8,6 +8,18 @@ environmentKinds:
   - tenant
 
 values:
+  resources.requests.memory:
+    displayName: memory_request
+    description: Amount of memory requested for pod
+    config:
+      type: string
+
+  resources.requests.cpu:
+    displayName: cpu_request
+    description: Amount of cpu requested for pod
+    config:
+      type: string
+
   log_level:
     displayName: log_level
     description: String sent to `RUST_LOG` env-var
