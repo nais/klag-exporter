@@ -179,6 +179,10 @@ impl OffsetCollector {
             .map(|g| g.group_id.as_str())
             .collect();
         let descriptions = self.client.describe_consumer_groups(&group_ids)?;
+        debug!(
+            descriptions = descriptions.len(),
+            "Fetched consumer group's descriptions"
+        );
 
         // Fetch watermarks in parallel
         let watermarks = self.client.fetch_all_watermarks_parallel().await?;
