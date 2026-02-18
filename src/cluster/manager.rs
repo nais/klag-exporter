@@ -133,6 +133,7 @@ impl ClusterManager {
                         debug!(cluster = %self.cluster_name, "Standby mode - skipping collection");
                         continue;
                     }
+                    self.registry.set_healthy(true);
 
                     // Wrap collect_once with a timeout to prevent hangs
                     let collection_result = tokio::time::timeout(
@@ -144,7 +145,6 @@ impl ClusterManager {
                         Ok(Ok(())) => {
                             consecutive_errors = 0;
                             current_backoff = Duration::from_secs(1);
-                            self.registry.set_healthy(true);
                         }
                         Ok(Err(e)) => {
                             consecutive_errors += 1;
