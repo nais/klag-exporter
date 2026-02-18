@@ -77,27 +77,26 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn cluster managers
     let mut handles = Vec::new();
-    for cluster_config in config.clusters.clone() {
+    for cluster_config in config.clusters {
         let registry = Arc::clone(&registry);
         let shutdown_rx = shutdown_tx.subscribe();
         let exporter_config = config.exporter.clone();
         let leadership = leadership_status.clone();
 
         let handle = tokio::spawn(async move {
-            let manager =
-                match ClusterManager::new(cluster_config.clone(), registry, &exporter_config) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        error!(
-                            cluster = cluster_config.name,
-                            error = %e,
-                            "Failed to create cluster manager"
-                        );
-                        return;
-                    }
-                };
-
-            manager.run(shutdown_rx, leadership).await;
+            match ClusterManager::new(&cluster_config, registry, &exporter_config) {
+                Ok(m) => m,
+                Err(e) => {
+                    error!(
+                        cluster = cluster_config.name,
+                        error = %e,
+                        "Failed to create cluster manager"
+                    );
+                    return;
+                }
+            }
+            .run(shutdown_rx, leadership)
+            .await;
         });
 
         handles.push(handle);
@@ -151,9 +150,10 @@ async fn main() -> anyhow::Result<()> {
         futures::future::join_all(handles),
     );
 
-    match shutdown_timeout.await {
-        Ok(_) => info!("All cluster managers stopped"),
-        Err(_) => error!("Timeout waiting for cluster managers to stop"),
+    if shutdown_timeout.await.is_ok() {
+        info!("All cluster managers stopped");
+    } else {
+        error!("Timeout waiting for cluster managers to stop");
     }
 
     // Stop leadership provider
@@ -233,7 +233,7 @@ async fn shutdown_signal() {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
+        () = ctrl_c => {},
+        () = terminate => {},
     }
 }

@@ -39,7 +39,7 @@ pub struct MemberSnapshot {
 }
 
 impl OffsetCollector {
-    /// Create a new OffsetCollector with default performance config.
+    /// Create a new `OffsetCollector` with default performance config.
     /// Prefer `with_performance` for large clusters.
     #[allow(dead_code)]
     pub fn new(client: Arc<KafkaClient>, filters: CompiledFilters) -> Self {
@@ -51,7 +51,7 @@ impl OffsetCollector {
         }
     }
 
-    pub fn with_performance(
+    pub const fn with_performance(
         client: Arc<KafkaClient>,
         filters: CompiledFilters,
         performance: PerformanceConfig,
@@ -246,7 +246,7 @@ impl OffsetCollector {
     }
 
     /// Fetch offsets for all groups in parallel with bounded concurrency.
-    /// Uses the Admin API (ListConsumerGroupOffsets) through the shared AdminClient — no per-group consumers needed.
+    /// Uses the Admin API (`ListConsumerGroupOffsets`) through the shared `AdminClient` — no per-group consumers needed.
     async fn fetch_all_group_offsets_parallel(
         &self,
         descriptions: &[crate::kafka::client::GroupDescription],

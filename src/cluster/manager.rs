@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, error, info, instrument, warn};
 
-/// Default timeout for a single collection cycle (should be less than poll_interval)
+/// Default timeout for a single collection cycle (should be less than `poll_interval`)
 const DEFAULT_COLLECTION_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct ClusterManager {
@@ -34,7 +34,7 @@ pub struct ClusterManager {
 
 impl ClusterManager {
     pub fn new(
-        config: ClusterConfig,
+        config: &ClusterConfig,
         registry: Arc<MetricsRegistry>,
         exporter_config: &ExporterConfig,
     ) -> Result<Self> {
@@ -43,17 +43,17 @@ impl ClusterManager {
         let filters = config.compile_filters()?;
         let performance = exporter_config.performance.clone();
 
-        let client = Arc::new(KafkaClient::with_performance(&config, performance.clone())?);
+        let client = Arc::new(KafkaClient::with_performance(config, performance.clone())?);
         let offset_collector =
-            OffsetCollector::with_performance(Arc::clone(&client), filters, performance.clone());
+            OffsetCollector::with_performance(Arc::clone(&client), filters, performance);
 
         let timestamp_sampler = if exporter_config.timestamp_sampling.enabled {
             let ts_consumer = TimestampConsumer::with_pool_size(
-                &config,
+                config,
                 exporter_config.timestamp_sampling.max_concurrent_fetches,
-            )?;
+            );
             Some(TimestampSampler::new(
-                ts_consumer,
+                ts_consumer?,
                 exporter_config.timestamp_sampling.cache_ttl,
             ))
         } else {
@@ -72,7 +72,10 @@ impl ClusterManager {
 
         // Collection timeout should be less than poll_interval to avoid overlap
         let collection_timeout = if exporter_config.poll_interval > Duration::from_secs(10) {
-            exporter_config.poll_interval - Duration::from_secs(5)
+            exporter_config
+                .poll_interval
+                .checked_sub(Duration::from_secs(5))
+                .expect("should not be negative")
         } else {
             DEFAULT_COLLECTION_TIMEOUT.min(exporter_config.poll_interval)
         };
@@ -275,7 +278,7 @@ impl ClusterManager {
         // Update registry with granularity and custom labels
         self.registry.update_with_options(
             &self.cluster_name,
-            lag_metrics,
+            &lag_metrics,
             self.granularity,
             &self.cluster_labels,
         );
@@ -287,7 +290,7 @@ impl ClusterManager {
         debug!(
             cluster = %self.cluster_name,
             elapsed_ms = scrape_duration_ms,
-            timestamp_cache_size = self.timestamp_sampler.as_ref().map(|s| s.cache_size()).unwrap_or(0),
+            timestamp_cache_size = self.timestamp_sampler.as_ref().map_or(0, TimestampSampler::cache_size),
             "Collection cycle completed"
         );
 

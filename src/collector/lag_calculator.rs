@@ -31,11 +31,11 @@ pub struct PartitionLagMetric {
     pub lag_seconds: Option<f64>,
     /// Whether compaction was detected for this partition's timestamp fetch
     pub compaction_detected: bool,
-    /// Whether data loss occurred (committed_offset < low_watermark)
+    /// Whether data loss occurred (`committed_offset` < `low_watermark`)
     pub data_loss_detected: bool,
-    /// Number of messages lost to retention (low_watermark - committed_offset when positive)
+    /// Number of messages lost to retention (`low_watermark` - `committed_offset` when positive)
     pub messages_lost: i64,
-    /// Offset distance to deletion boundary (committed_offset - low_watermark)
+    /// Offset distance to deletion boundary (`committed_offset` - `low_watermark`)
     pub retention_margin: i64,
     /// Percentage of retention window occupied by lag (0=caught up, 100=at boundary, >100=data loss)
     pub lag_retention_ratio: f64,
@@ -133,16 +133,16 @@ impl LagCalculator {
                 };
 
                 // Look up member info for this partition
-                let (member_host, consumer_id, client_id) = member_map
-                    .get(tp)
-                    .map(|m| {
-                        (
-                            m.client_host.to_string(),
-                            m.member_id.to_string(),
-                            m.client_id.to_string(),
-                        )
-                    })
-                    .unwrap_or_else(|| (String::new(), String::new(), String::new()));
+                let (member_host, consumer_id, client_id) =
+                    member_map
+                        .get(tp)
+                        .map_or((String::new(), String::new(), String::new()), |m| {
+                            (
+                                m.client_host.to_string(),
+                                m.member_id.to_string(),
+                                m.client_id.to_string(),
+                            )
+                        });
 
                 // Calculate time lag if timestamp available
                 let ts_data = timestamps.get(&(group.group_id.clone(), tp.clone()));
@@ -151,7 +151,7 @@ impl LagCalculator {
                         .map(|td| ((now_ms - td.timestamp_ms) as f64) / 1000.0)
                         .map(|s| s.max(0.0))
                         // For data-loss-affected partitions without timestamp, still emit metric
-                        // so it shows up in dashboards with data_loss_detected label
+                        // so it shows up in dashboards with `data_loss_detected` label
                         .or(if data_loss_detected { Some(0.0) } else { None })
                 } else {
                     Some(0.0)

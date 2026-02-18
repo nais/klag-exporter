@@ -74,7 +74,7 @@ pub struct KafkaClient {
 }
 
 impl KafkaClient {
-    /// Create a new KafkaClient with default performance config.
+    /// Create a new `KafkaClient` with default performance config.
     /// Prefer `with_performance` for large clusters.
     #[allow(dead_code)]
     pub fn new(config: &ClusterConfig) -> Result<Self> {
@@ -118,7 +118,7 @@ impl KafkaClient {
     }
 
     #[allow(dead_code)]
-    pub fn performance(&self) -> &PerformanceConfig {
+    pub const fn performance(&self) -> &PerformanceConfig {
         &self.performance
     }
 
@@ -188,7 +188,7 @@ impl KafkaClient {
     }
 
     /// Fetch committed offsets for a consumer group using the Admin API.
-    /// Uses the existing AdminClient connection — no additional consumers/FDs needed.
+    /// Uses the existing `AdminClient` connection — no additional consumers/FDs needed.
     #[instrument(skip(self, partitions), fields(cluster = %self.config.name, group = %group_id))]
     pub fn list_consumer_group_offsets(
         &self,
@@ -311,7 +311,7 @@ impl KafkaClient {
 
             // Issue the async call
             let mut request_ptr = request;
-            rd_kafka_ListConsumerGroupOffsets(rk, &mut request_ptr, 1, options, queue);
+            rd_kafka_ListConsumerGroupOffsets(rk, &raw mut request_ptr, 1, options, queue);
             // After the call, the request is consumed; prevent double-free
             cleanup.request = std::ptr::null_mut();
 
@@ -355,7 +355,8 @@ impl KafkaClient {
             }
 
             let mut n_groups: usize = 0;
-            let groups_ptr = rd_kafka_ListConsumerGroupOffsets_result_groups(result, &mut n_groups);
+            let groups_ptr =
+                rd_kafka_ListConsumerGroupOffsets_result_groups(result, &raw mut n_groups);
 
             let mut offsets = HashMap::new();
 
@@ -591,7 +592,7 @@ impl KafkaClient {
     }
 
     #[allow(dead_code)]
-    pub fn inner_admin(&self) -> &AdminClient<DefaultClientContext> {
+    pub const fn inner_admin(&self) -> &AdminClient<DefaultClientContext> {
         &self.admin
     }
 

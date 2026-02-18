@@ -82,7 +82,7 @@ pub struct LeadershipConfig {
     /// Enable leader election. When disabled (default), runs in single-instance mode.
     #[serde(default)]
     pub enabled: bool,
-    /// Leadership provider type. Currently only "kubernetes" is supported.
+    /// Leadership provider type. Currently only `kubernetes` is supported.
     #[serde(default = "default_leadership_provider")]
     pub provider: LeadershipProvider,
     /// Name of the Kubernetes Lease resource.
@@ -91,14 +91,14 @@ pub struct LeadershipConfig {
     /// Namespace for the Lease resource. Supports env var substitution.
     #[serde(default = "default_lease_namespace")]
     pub lease_namespace: String,
-    /// Identity of this instance. Defaults to HOSTNAME or POD_NAME env var.
+    /// Identity of this instance. Defaults to `HOSTNAME` or `POD_NAME` env var.
     #[allow(dead_code)] // Used by kubernetes feature
     pub identity: Option<String>,
     /// Duration the lease is valid in seconds.
     #[serde(default = "default_lease_duration")]
     #[allow(dead_code)] // Used by kubernetes feature
     pub lease_duration_secs: u32,
-    /// Grace period for lease renewal in seconds. Must be less than lease_duration.
+    /// Grace period for lease renewal in seconds. Must be less than `lease_duration`.
     #[serde(default = "default_grace_period")]
     #[allow(dead_code)] // Used by kubernetes feature
     pub grace_period_secs: u32,
@@ -129,11 +129,11 @@ pub struct ClusterConfig {
     pub labels: HashMap<String, String>,
 }
 
-fn default_poll_interval() -> Duration {
+const fn default_poll_interval() -> Duration {
     Duration::from_secs(30)
 }
 
-fn default_http_port() -> u16 {
+const fn default_http_port() -> u16 {
     8000
 }
 
@@ -141,35 +141,35 @@ fn default_http_host() -> String {
     "0.0.0.0".to_string()
 }
 
-fn default_granularity() -> Granularity {
+const fn default_granularity() -> Granularity {
     Granularity::Topic
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
-fn default_cache_ttl() -> Duration {
+const fn default_cache_ttl() -> Duration {
     Duration::from_secs(60)
 }
 
-fn default_max_concurrent_fetches() -> usize {
+const fn default_max_concurrent_fetches() -> usize {
     10
 }
 
-fn default_kafka_timeout() -> Duration {
+const fn default_kafka_timeout() -> Duration {
     Duration::from_secs(30)
 }
 
-fn default_offset_fetch_timeout() -> Duration {
+const fn default_offset_fetch_timeout() -> Duration {
     Duration::from_secs(10)
 }
 
-fn default_max_concurrent_groups() -> usize {
+const fn default_max_concurrent_groups() -> usize {
     10
 }
 
-fn default_max_concurrent_watermarks() -> usize {
+const fn default_max_concurrent_watermarks() -> usize {
     50
 }
 
@@ -177,11 +177,11 @@ fn default_otel_endpoint() -> String {
     "http://localhost:4317".to_string()
 }
 
-fn default_export_interval() -> Duration {
+const fn default_export_interval() -> Duration {
     Duration::from_secs(60)
 }
 
-fn default_leadership_provider() -> LeadershipProvider {
+const fn default_leadership_provider() -> LeadershipProvider {
     LeadershipProvider::Kubernetes
 }
 
@@ -193,11 +193,11 @@ fn default_lease_namespace() -> String {
     "default".to_string()
 }
 
-fn default_lease_duration() -> u32 {
+const fn default_lease_duration() -> u32 {
     15
 }
 
-fn default_grace_period() -> u32 {
+const fn default_grace_period() -> u32 {
     5
 }
 
@@ -255,21 +255,20 @@ impl Default for PerformanceConfig {
 }
 
 impl Config {
-    pub fn load(path: Option<&str>) -> Result<Config> {
+    pub fn load(path: Option<&str>) -> Result<Self> {
         let config_path = path.unwrap_or("config.toml");
 
         if !Path::new(config_path).exists() {
             return Err(KlagError::Config(format!(
-                "Configuration file not found: {}",
-                config_path
+                "Configuration file not found: {config_path}"
             )));
         }
 
         let content = std::fs::read_to_string(config_path)?;
         let content = Self::substitute_env_vars(&content);
 
-        let config: Config = toml::from_str(&content)
-            .map_err(|e| KlagError::Config(format!("TOML parse error: {}", e)))?;
+        let config: Self = toml::from_str(&content)
+            .map_err(|e| KlagError::Config(format!("TOML parse error: {e}")))?;
 
         config.validate()?;
         Ok(config)
@@ -280,10 +279,11 @@ impl Config {
         // - ${VAR} - replaced with env var value, empty string if not set
         // - ${VAR:-default} - replaced with env var value, or "default" if not set
         // - ${?VAR} - replaced with env var value if set, empty string if not set (same as ${VAR})
-        let re = Regex::new(r"\$\{\??([^}:-]+)(?::-([^}]*))?\}").unwrap();
+        let re = Regex::new(r"\$\{\??([^}:-]+)(?::-([^}]*))?\}")
+            .expect("Hardcoded regex pattern to compile");
         re.replace_all(content, |caps: &regex::Captures| {
             let var_name = &caps[1];
-            let default_value = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+            let default_value = caps.get(2).map_or("", |m| m.as_str());
             std::env::var(var_name).unwrap_or_else(|_| default_value.to_string())
         })
         .to_string()

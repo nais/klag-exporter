@@ -6,7 +6,7 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
 use rdkafka::Offset;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 use tracing::{debug, instrument, warn};
 
@@ -17,7 +17,7 @@ pub struct TimestampFetchResult {
     pub timestamp_ms: i64,
 }
 
-/// Pool-based timestamp consumer. Maintains a pool of reusable BaseConsumers
+/// Pool-based timestamp consumer. Maintains a pool of reusable `BaseConsumers`
 /// to avoid connection churn (TCP/TLS/SASL handshake per fetch).
 pub struct TimestampConsumer {
     config: ClusterConfig,
@@ -83,17 +83,13 @@ impl TimestampConsumer {
     }
 
     /// Take a consumer from the pool, or create a new one if the pool is empty.
+    /// If `self.pool` is exhausted (more concurrent fetches than `pool_size`); create a temporary one
     fn acquire(&self) -> Result<BaseConsumer> {
-        let mut pool = self
-            .pool
+        self.pool
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(consumer) = pool.pop() {
-            Ok(consumer)
-        } else {
-            // Pool exhausted (more concurrent fetches than pool_size); create a temporary one
-            self.create_consumer()
-        }
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop()
+            .map_or_else(|| self.create_consumer(), Ok)
     }
 
     /// Return a consumer to the pool. If the pool is full, the consumer is dropped.
@@ -106,10 +102,7 @@ impl TimestampConsumer {
             return;
         }
 
-        let mut pool = self
-            .pool
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut pool = self.pool.lock().unwrap_or_else(PoisonError::into_inner);
         if pool.len() < self.pool_size {
             pool.push(consumer);
         }
@@ -131,7 +124,7 @@ impl TimestampConsumer {
             consumer: Option<BaseConsumer>,
             pool: &'a TimestampConsumer,
         }
-        impl<'a> Drop for PoolGuard<'a> {
+        impl Drop for PoolGuard<'_> {
             fn drop(&mut self) {
                 if let Some(consumer) = self.consumer.take() {
                     self.pool.release(consumer);
@@ -151,8 +144,17 @@ impl TimestampConsumer {
 
         consumer.assign(&tpl).map_err(KlagError::Kafka)?;
 
-        let result = match consumer.poll(self.fetch_timeout) {
-            Some(result) => match result {
+        let result = consumer.poll(self.fetch_timeout).map_or_else(
+            || {
+                debug!(
+                    topic = tp.topic,
+                    partition = tp.partition,
+                    offset = offset,
+                    "No message available at offset (may be beyond high watermark)"
+                );
+                Ok(None)
+            },
+            |result| match result {
                 Ok(msg) => {
                     let timestamp = msg.timestamp().to_millis();
 
@@ -177,16 +179,7 @@ impl TimestampConsumer {
                     Err(KlagError::Kafka(e))
                 }
             },
-            None => {
-                debug!(
-                    topic = tp.topic,
-                    partition = tp.partition,
-                    offset = offset,
-                    "No message available at offset (may be beyond high watermark)"
-                );
-                Ok(None)
-            }
-        };
+        );
 
         // Take consumer out of guard so drop still returns it to pool
         // (guard.drop() handles the release)
