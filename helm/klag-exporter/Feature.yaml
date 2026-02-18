@@ -57,11 +57,6 @@ values:
     description: "Max concurrent watermarks (read: topics) per fetch"
     config:
       type: int
-  config.clusters.group_whitelist:
-    displayName: group_whitelist
-    description: "Regexes for groups to include (empty list means include all)"
-    config:
-      type: string_array
 
   livenessProbe.initialDelaySeconds:
     displayName: livenessProbe_initialDelaySeconds
