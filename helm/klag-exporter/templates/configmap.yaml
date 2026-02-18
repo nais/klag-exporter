@@ -30,7 +30,7 @@ data:
     {{- end }}
 
     [exporter.otel]
-    {{- with index .Values.config "exporter.otel" }}
+    {{- with index .Values.config "exporter" "otel" }}
     enabled = {{ .enabled }}
     endpoint = {{ .endpoint | quote }}
     export_interval = {{ .export_interval | quote }}
