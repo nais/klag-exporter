@@ -6,6 +6,10 @@ metadata:
     {{- include "klag-exporter.labels" . | nindent 4 }}
 spec:
   kafka:
-    pool: {{ (index .Values "config" "clusters" 0 "name") }}
-    secretName: {{ (index .Values "customSecretVolumes" 0 "secretName") }}
+    {{- if and .Values.config .Values.config.clusters }}
+    pool: {{ (first .Values.config.clusters).name }}
+    {{- end }}
+    {{- if and .Values.customSecretVolumes (gt (len .Values.customSecretVolumes) 0) }}
+    secretName: {{ (first .Values.customSecretVolumes).secretName }}
+    {{- end }}
   protected: true
