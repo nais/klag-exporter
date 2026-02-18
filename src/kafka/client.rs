@@ -503,7 +503,7 @@ impl KafkaClient {
 
     /// Fetch watermarks for all partitions in parallel with bounded concurrency.
     /// This is more efficient for large clusters with many partitions.
-    #[instrument(skip(self), fields(cluster = %self.config.name))]
+    #[instrument(skip(self))]
     pub async fn fetch_all_watermarks_parallel(
         &self,
     ) -> Result<HashMap<TopicPartition, (i64, i64)>> {
@@ -524,7 +524,6 @@ impl KafkaClient {
 
         let total_partitions = partitions.len();
         debug!(
-            cluster = %self.config.name,
             partitions = total_partitions,
             max_concurrent = max_concurrent,
             "Fetching watermarks in parallel"
@@ -582,7 +581,6 @@ impl KafkaClient {
         }
 
         debug!(
-            cluster = %self.config.name,
             fetched = watermarks.len(),
             total = total_partitions,
             "Parallel watermark fetch completed"

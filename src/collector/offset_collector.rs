@@ -152,7 +152,7 @@ impl OffsetCollector {
 
     /// Collect offsets with parallel watermark and group offset fetching.
     /// This is more efficient for large clusters with many groups and partitions.
-    #[instrument(skip(self), fields(cluster = %self.client.cluster_name()))]
+    #[instrument(skip(self))]
     pub async fn collect_parallel(&self) -> Result<OffsetsSnapshot> {
         let start = std::time::Instant::now();
 

@@ -98,7 +98,7 @@ impl ClusterManager {
 
     #[instrument(skip(self, shutdown, leadership), fields(cluster = %self.cluster_name))]
     pub async fn run(self, mut shutdown: broadcast::Receiver<()>, leadership: LeadershipStatus) {
-        info!(cluster = %self.cluster_name, "Starting collection loop");
+        info!("Starting collection loop");
 
         let mut interval = tokio::time::interval(self.poll_interval);
         let mut cache_cleanup_interval = tokio::time::interval(self.cache_cleanup_interval);
@@ -107,10 +107,7 @@ impl ClusterManager {
         let mut was_leader = leadership.is_leader();
 
         if !was_leader {
-            info!(
-                cluster = %self.cluster_name,
-                "Starting in standby mode - waiting for leadership"
-            );
+            info!("Starting in standby mode - waiting for leadership");
         }
 
         loop {
@@ -122,9 +119,9 @@ impl ClusterManager {
                     // Log leadership transitions
                     if is_leader != was_leader {
                         if is_leader {
-                            info!(cluster = %self.cluster_name, "Acquired leadership - starting collection");
+                            info!("Acquired leadership - starting collection");
                         } else {
-                            info!(cluster = %self.cluster_name, "Lost leadership - pausing collection");
+                            info!("Lost leadership - pausing collection");
                             // Clear metrics when losing leadership to avoid stale data
                             self.registry.remove_cluster(&self.cluster_name);
                         }
@@ -133,7 +130,7 @@ impl ClusterManager {
 
                     // Skip collection if not leader
                     if !is_leader {
-                        debug!(cluster = %self.cluster_name, "Standby mode - skipping collection");
+                        debug!("Standby mode - skipping collection");
                         continue;
                     }
                     self.registry.set_healthy(true);
@@ -152,7 +149,6 @@ impl ClusterManager {
                         Ok(Err(e)) => {
                             consecutive_errors += 1;
                             error!(
-                                cluster = %self.cluster_name,
                                 error = %e,
                                 consecutive_errors = consecutive_errors,
                                 "Collection failed"
@@ -163,7 +159,6 @@ impl ClusterManager {
 
                                 let backoff = current_backoff.min(self.max_backoff);
                                 warn!(
-                                    cluster = %self.cluster_name,
                                     backoff_secs = backoff.as_secs(),
                                     "Applying backoff due to consecutive errors"
                                 );
@@ -175,7 +170,6 @@ impl ClusterManager {
                         Err(_timeout) => {
                             consecutive_errors += 1;
                             error!(
-                                cluster = %self.cluster_name,
                                 timeout_secs = self.collection_timeout.as_secs(),
                                 consecutive_errors = consecutive_errors,
                                 "Collection timed out"
@@ -196,7 +190,6 @@ impl ClusterManager {
                             let after = sampler.cache_size();
                             if before != after {
                                 debug!(
-                                    cluster = %self.cluster_name,
                                     before = before,
                                     after = after,
                                     "Cleaned up stale cache entries"
@@ -206,7 +199,7 @@ impl ClusterManager {
                     }
                 }
                 _ = shutdown.recv() => {
-                    info!(cluster = %self.cluster_name, "Received shutdown signal");
+                    info!("Received shutdown signal");
                     break;
                 }
             }
@@ -214,10 +207,10 @@ impl ClusterManager {
 
         // Cleanup
         self.registry.remove_cluster(&self.cluster_name);
-        info!(cluster = %self.cluster_name, "Collection loop stopped");
+        info!("Collection loop stopped");
     }
 
-    #[instrument(skip(self), fields(cluster = %self.cluster_name))]
+    #[instrument(skip(self))]
     async fn collect_once(&self) -> Result<()> {
         let start = Instant::now();
 
@@ -225,7 +218,6 @@ impl ClusterManager {
         let snapshot = self.offset_collector.collect_parallel().await?;
 
         debug!(
-            cluster = %self.cluster_name,
             groups = snapshot.groups.len(),
             partitions = snapshot.watermarks.len(),
             "Collected offsets"
@@ -236,7 +228,6 @@ impl ClusterManager {
             Ok(topics) => {
                 if !topics.is_empty() {
                     debug!(
-                        cluster = %self.cluster_name,
                         compacted_topics = ?topics,
                         "Identified compacted topics"
                     );
@@ -245,7 +236,6 @@ impl ClusterManager {
             }
             Err(e) => {
                 warn!(
-                    cluster = %self.cluster_name,
                     error = %e,
                     "Failed to fetch topic configs, assuming no compacted topics"
                 );
@@ -288,9 +278,11 @@ impl ClusterManager {
         self.registry.set_scrape_duration_ms(scrape_duration_ms);
 
         debug!(
-            cluster = %self.cluster_name,
             elapsed_ms = scrape_duration_ms,
-            timestamp_cache_size = self.timestamp_sampler.as_ref().map_or(0, TimestampSampler::cache_size),
+            timestamp_cache_size = self
+                .timestamp_sampler
+                .as_ref()
+                .map_or(0, TimestampSampler::cache_size),
             "Collection cycle completed"
         );
 
