@@ -112,8 +112,6 @@ values:
       type: int
 
   config.clusters:
-    config:
-      type: string
     computed:
       template: |
         - name: "{{ .Env.aiven_project }}"
