@@ -200,7 +200,7 @@ impl KafkaClient {
 
         let group_cstr = CString::new(group_id)
             .map_err(|e| KlagError::Admin(format!("Invalid group_id contains null byte: {e}")))?;
-        let timeout_ms = timeout.as_millis() as i32;
+        let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
 
         unsafe {
             // Get the native rd_kafka_t handle from the AdminClient
@@ -262,8 +262,9 @@ impl KafkaClient {
             for tp in partitions {
                 let topic_cstr = CString::new(tp.topic.as_str())
                     .map_err(|e| KlagError::Admin(format!("Topic name contains null byte: {e}")))?;
-                rd_kafka_topic_partition_list_add(c_tpl, topic_cstr.as_ptr(), tp.partition);
                 cleanup._topic_cstrings.push(topic_cstr);
+                let cstr_ptr = cleanup._topic_cstrings.last().unwrap().as_ptr();
+                rd_kafka_topic_partition_list_add(c_tpl, cstr_ptr, tp.partition);
             }
 
             // Create the request object
@@ -358,6 +359,11 @@ impl KafkaClient {
 
             let mut offsets = HashMap::new();
 
+            if groups_ptr.is_null() || n_groups == 0 {
+                debug!(group = group_id, "No group results returned from Admin API");
+                return Ok(offsets);
+            }
+
             for i in 0..n_groups {
                 let group = *groups_ptr.add(i);
 
@@ -384,11 +390,14 @@ impl KafkaClient {
 
                 let cnt = (*result_partitions).cnt;
                 let elems = (*result_partitions).elems;
+                if elems.is_null() {
+                    continue;
+                }
 
                 for j in 0..cnt {
                     let elem = &*elems.add(j as usize);
                     // offset == -1001 (RD_KAFKA_OFFSET_INVALID) means no committed offset
-                    if elem.offset >= 0 {
+                    if elem.offset >= 0 && !elem.topic.is_null() {
                         let topic = CStr::from_ptr(elem.topic).to_string_lossy().to_string();
                         offsets.insert(TopicPartition::new(topic, elem.partition), elem.offset);
                     }

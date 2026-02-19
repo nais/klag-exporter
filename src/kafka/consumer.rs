@@ -84,7 +84,10 @@ impl TimestampConsumer {
 
     /// Take a consumer from the pool, or create a new one if the pool is empty.
     fn acquire(&self) -> Result<BaseConsumer> {
-        let mut pool = self.pool.lock().unwrap();
+        let mut pool = self
+            .pool
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(consumer) = pool.pop() {
             Ok(consumer)
         } else {
@@ -103,7 +106,10 @@ impl TimestampConsumer {
             return;
         }
 
-        let mut pool = self.pool.lock().unwrap();
+        let mut pool = self
+            .pool
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if pool.len() < self.pool_size {
             pool.push(consumer);
         }
@@ -120,16 +126,30 @@ impl TimestampConsumer {
 
         let consumer = self.acquire()?;
 
-        let mut tpl = TopicPartitionList::new();
-        if let Err(e) = tpl.add_partition_offset(&tp.topic, tp.partition, Offset::Offset(offset)) {
-            self.release(consumer);
-            return Err(KlagError::Kafka(e));
+        // RAII guard ensures consumer is returned to pool even on panic
+        struct PoolGuard<'a> {
+            consumer: Option<BaseConsumer>,
+            pool: &'a TimestampConsumer,
+        }
+        impl<'a> Drop for PoolGuard<'a> {
+            fn drop(&mut self) {
+                if let Some(consumer) = self.consumer.take() {
+                    self.pool.release(consumer);
+                }
+            }
         }
 
-        if let Err(e) = consumer.assign(&tpl) {
-            self.release(consumer);
-            return Err(KlagError::Kafka(e));
-        }
+        let guard = PoolGuard {
+            consumer: Some(consumer),
+            pool: self,
+        };
+        let consumer = guard.consumer.as_ref().unwrap();
+
+        let mut tpl = TopicPartitionList::new();
+        tpl.add_partition_offset(&tp.topic, tp.partition, Offset::Offset(offset))
+            .map_err(KlagError::Kafka)?;
+
+        consumer.assign(&tpl).map_err(KlagError::Kafka)?;
 
         let result = match consumer.poll(self.fetch_timeout) {
             Some(result) => match result {
@@ -168,7 +188,8 @@ impl TimestampConsumer {
             }
         };
 
-        self.release(consumer);
+        // Take consumer out of guard so drop still returns it to pool
+        // (guard.drop() handles the release)
         result
     }
 

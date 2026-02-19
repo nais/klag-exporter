@@ -18,14 +18,20 @@ for ((i=1; i<=NUM_TOPICS; i++)); do
 
     # Wait in batches to avoid overwhelming the broker
     if (( i % BATCH_SIZE == 0 )); then
-        wait
+        if ! wait; then
+            echo "ERROR: Some topic creations failed in batch ending at topic-$i"
+            exit 1
+        fi
         created=$i
         echo "Created $created / $NUM_TOPICS topics..."
     fi
 done
 
 # Wait for any remaining
-wait
+if ! wait; then
+    echo "ERROR: Some topic creations failed in final batch"
+    exit 1
+fi
 echo "All $NUM_TOPICS topics created successfully."
 
 # Verify
