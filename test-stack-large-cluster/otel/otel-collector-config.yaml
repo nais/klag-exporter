@@ -21,7 +21,7 @@ exporters:
     sampling_initial: 5
     sampling_thereafter: 200
 
-  # Prometheus exporter - makes metrics scrapeable at :8889/metrics
+  # Prometheus exporter - makes metrics scrapable at :8889/metrics
   prometheus:
     endpoint: 0.0.0.0:8889
     namespace: klag

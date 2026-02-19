@@ -825,7 +825,7 @@
         }
       ],
       "title": "Max Lag/Retention Ratio",
-      "description": "0% of available messages are unconsumed. Maximum percentage of retention window used by lag. >75% = danger zone, 100% = at deletion boundary",
+      "description": "Percentage of the retention window consumed by lag. 0% = no lag, >75% = danger zone, 100% = at deletion boundary",
       "type": "gauge"
     },
     {

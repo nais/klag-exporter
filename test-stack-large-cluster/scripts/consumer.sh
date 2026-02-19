@@ -6,12 +6,17 @@ NUM_GROUPS="${NUM_CONSUMER_GROUPS:-10}"
 
 TOPICS_PER_GROUP=$((NUM_TOPICS / NUM_GROUPS))
 
-echo "Starting $NUM_GROUPS consumer groups, each covering $TOPICS_PER_GROUP topics..."
+echo "Starting $NUM_GROUPS consumer groups, each covering ~$TOPICS_PER_GROUP topics..."
 
 # Launch one consumer per group, each subscribing to a slice of topics
 for ((g=1; g<=NUM_GROUPS; g++)); do
     START=$(( (g - 1) * TOPICS_PER_GROUP + 1 ))
-    END=$(( g * TOPICS_PER_GROUP ))
+    # Last group picks up any remainder from integer division
+    if (( g == NUM_GROUPS )); then
+        END=$NUM_TOPICS
+    else
+        END=$(( g * TOPICS_PER_GROUP ))
+    fi
 
     # Build a regex pattern for this group's topic range
     # e.g., group 1 gets topic-1 through topic-50
@@ -32,10 +37,10 @@ for ((g=1; g<=NUM_GROUPS; g++)); do
             kafka-console-consumer \
                 --bootstrap-server "$BOOTSTRAP" \
                 --group "$GROUP_ID" \
-                --whitelist "^(${TOPIC_LIST})$" \
+                --include "^(${TOPIC_LIST})$" \
                 --max-messages 10 \
                 --timeout-ms 30000 \
-                > /dev/null 2>&1
+                >> "/tmp/${GROUP_ID}.log" 2>&1
             # Intentional delay to build lag
             sleep 15
         done

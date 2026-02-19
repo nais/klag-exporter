@@ -2,6 +2,7 @@
 
 BOOTSTRAP="kafka:29092"
 NUM_TOPICS="${NUM_TOPICS:-500}"
+BATCH_SIZE=50
 
 echo "Starting bulk producer for $NUM_TOPICS topics..."
 
@@ -12,16 +13,14 @@ while true; do
     echo "[$(date)] Producer cycle $CYCLE - writing to $NUM_TOPICS topics"
 
     for ((i=1; i<=NUM_TOPICS; i++)); do
-        # Produce 2 messages per topic per cycle
-        echo "msg-${CYCLE}-1-$(date +%s%N)" | kafka-console-producer \
-            --bootstrap-server "$BOOTSTRAP" \
-            --topic "topic-$i" 2>/dev/null &
-        echo "msg-${CYCLE}-2-$(date +%s%N)" | kafka-console-producer \
-            --bootstrap-server "$BOOTSTRAP" \
-            --topic "topic-$i" 2>/dev/null &
+        # Produce 2 messages per topic per cycle using a single producer invocation
+        printf "msg-${CYCLE}-1-$(date +%s%N)\nmsg-${CYCLE}-2-$(date +%s%N)\n" | \
+            kafka-console-producer \
+                --bootstrap-server "$BOOTSTRAP" \
+                --topic "topic-$i" >> /tmp/producer.log 2>&1 &
 
-        # Batch parallelism: wait every 50 topics
-        if (( i % 50 == 0 )); then
+        # Batch parallelism: wait every BATCH_SIZE topics to avoid process table overflow
+        if (( i % BATCH_SIZE == 0 )); then
             wait
         fi
     done
