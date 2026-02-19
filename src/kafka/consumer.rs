@@ -8,7 +8,7 @@ use rdkafka::Offset;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument, trace, warn};
 
 /// Result of fetching a timestamp from Kafka
 #[derive(Debug, Clone)]
@@ -158,7 +158,7 @@ impl TimestampConsumer {
                 Ok(msg) => {
                     let timestamp = msg.timestamp().to_millis();
 
-                    debug!(
+                    trace!(
                         topic = tp.topic,
                         partition = tp.partition,
                         requested_offset = offset,

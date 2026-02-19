@@ -9,7 +9,7 @@ use rdkafka::metadata::Metadata;
 use rdkafka::TopicPartitionList;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument, trace, warn};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TopicPartition {
@@ -232,7 +232,7 @@ impl KafkaClient {
             }
         }
 
-        debug!(
+        trace!(
             group = group_id,
             partitions = offsets.len(),
             "Fetched committed offsets via Admin API"
@@ -381,7 +381,7 @@ impl KafkaClient {
                         if entry.name == "cleanup.policy" {
                             if let Some(value) = entry.value {
                                 if value.contains("compact") {
-                                    debug!(topic = %topic_name, cleanup_policy = %value, "Topic has compaction enabled");
+                                    trace!(topic = %topic_name, cleanup_policy = %value, "Topic has compaction enabled");
                                     compacted_topics.insert(topic_name.clone());
                                 }
                             }

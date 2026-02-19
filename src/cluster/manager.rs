@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, OwnedSemaphorePermit, Semaphore};
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 /// Default timeout for a single collection cycle (should be less than `poll_interval`)
 const DEFAULT_COLLECTION_TIMEOUT: Duration = Duration::from_secs(60);
@@ -296,18 +296,18 @@ impl ClusterManager {
         snapshot: &crate::collector::offset_collector::OffsetsSnapshot,
     ) -> HashMap<(String, TopicPartition), TimestampData> {
         // Build list of requests for partitions with lag
-        let mut requests: Vec<(String, TopicPartition, i64)> = Vec::new();
-
-        for group in &snapshot.groups {
-            for (tp, committed_offset) in &group.offsets {
-                let high_watermark = snapshot.get_high_watermark(tp).unwrap_or(*committed_offset);
-                let lag = high_watermark - committed_offset;
-
-                if lag > 0 {
-                    requests.push((group.group_id.clone(), tp.clone(), *committed_offset));
-                }
-            }
-        }
+        let requests: Vec<(String, TopicPartition, i64)> = snapshot
+            .groups
+            .iter()
+            .flat_map(|group| {
+                group.offsets.iter().filter_map(|(tp, committed_offset)| {
+                    (snapshot.get_high_watermark(tp).unwrap_or(*committed_offset)
+                        - committed_offset
+                        > 0)
+                    .then(|| (group.group_id.clone(), tp.clone(), *committed_offset))
+                })
+            })
+            .collect();
 
         if requests.is_empty() {
             return HashMap::new();
@@ -367,7 +367,7 @@ impl ClusterManager {
                     );
                 }
                 Ok(Ok(((group_id, tp), Ok(None)))) => {
-                    debug!(
+                    trace!(
                         group = group_id,
                         topic = tp.topic,
                         partition = tp.partition,
