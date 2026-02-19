@@ -65,7 +65,7 @@ pub enum OffsetPosition {
 
 pub struct KafkaClient {
     admin: AdminClient<DefaultClientContext>,
-    consumer: BaseConsumer,
+    consumer: Arc<BaseConsumer>,
     config: ClusterConfig,
     timeout: Duration,
     performance: PerformanceConfig,
@@ -108,7 +108,7 @@ impl KafkaClient {
 
         Ok(Self {
             admin,
-            consumer,
+            consumer: Arc::new(consumer),
             config: config.clone(),
             timeout,
             performance,
@@ -346,59 +346,25 @@ impl KafkaClient {
 
         // Use semaphore to limit concurrency
         let semaphore = Arc::new(Semaphore::new(max_concurrent));
-        let bootstrap_servers = self.config.bootstrap_servers.clone();
-        let consumer_properties = self.config.consumer_properties.clone();
+        let consumer = Arc::clone(&self.consumer);
         let timeout = self.timeout;
-        let cluster_name = self.config.name.clone();
 
         let mut handles = Vec::with_capacity(partitions.len());
 
         for (topic, partition) in partitions {
             let semaphore_clone = semaphore.clone();
-            let bootstrap = bootstrap_servers.clone();
-            let props = consumer_properties.clone();
-            let cluster = cluster_name.clone();
+            let consumer_clone = Arc::clone(&consumer);
 
-            // Spawn async task that properly awaits the semaphore before spawning blocking work
             let handle = tokio::spawn(async move {
-                // Acquire permit - this properly awaits until one is available
                 let permit: OwnedSemaphorePermit = semaphore_clone
                     .acquire_owned()
                     .await
                     .expect("semaphore closed");
 
-                // Now spawn the blocking task with the permit held
                 tokio::task::spawn_blocking(move || {
-                    let _permit = permit; // Hold permit until blocking work completes
+                    let _permit = permit;
 
-                    // Create a temporary consumer for this fetch
-                    let mut client_config = ClientConfig::new();
-                    client_config.set("bootstrap.servers", &bootstrap);
-                    client_config.set(
-                        "client.id",
-                        format!("klag-wm-{}-{}-{}", cluster, topic, partition),
-                    );
-                    client_config.set("group.id", format!("klag-wm-internal-{}", cluster));
-                    client_config.set("enable.auto.commit", "false");
-
-                    for (key, value) in &props {
-                        client_config.set(key, value);
-                    }
-
-                    let consumer: BaseConsumer = match client_config.create() {
-                        Ok(c) => c,
-                        Err(e) => {
-                            warn!(
-                                topic = topic,
-                                partition = partition,
-                                error = %e,
-                                "Failed to create consumer for watermark fetch"
-                            );
-                            return None;
-                        }
-                    };
-
-                    match consumer.fetch_watermarks(&topic, partition, timeout) {
+                    match consumer_clone.fetch_watermarks(&topic, partition, timeout) {
                         Ok((low, high)) => {
                             Some((TopicPartition::new(&topic, partition), (low, high)))
                         }
