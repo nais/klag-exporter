@@ -48,7 +48,10 @@ impl ClusterManager {
             OffsetCollector::with_performance(Arc::clone(&client), filters, performance.clone());
 
         let timestamp_sampler = if exporter_config.timestamp_sampling.enabled {
-            let ts_consumer = TimestampConsumer::new(&config)?;
+            let ts_consumer = TimestampConsumer::with_pool_size(
+                &config,
+                exporter_config.timestamp_sampling.max_concurrent_fetches,
+            )?;
             Some(TimestampSampler::new(
                 ts_consumer,
                 exporter_config.timestamp_sampling.cache_ttl,

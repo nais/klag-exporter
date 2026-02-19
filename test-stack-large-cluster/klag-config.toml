@@ -1,0 +1,30 @@
+# klag-exporter configuration for large-cluster FD exhaustion test
+
+[exporter]
+poll_interval = "60s"
+http_port = 8000
+http_host = "0.0.0.0"
+granularity = "partition"
+
+[exporter.timestamp_sampling]
+enabled = true
+cache_ttl = "30s"
+max_concurrent_fetches = 10
+
+[exporter.otel]
+enabled = true
+endpoint = "http://otel-collector:4317"
+export_interval = "15s"
+
+[[clusters]]
+name = "large-cluster"
+bootstrap_servers = "kafka:29092"
+group_whitelist = [".*"]
+group_blacklist = []
+topic_whitelist = [".*"]
+topic_blacklist = ["^__.*"]
+
+[clusters.consumer_properties]
+
+[clusters.labels]
+environment = "fd-exhaustion-test"

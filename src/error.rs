@@ -35,6 +35,9 @@ pub enum KlagError {
     #[allow(dead_code)]
     #[error("Leadership error: {0}")]
     Leadership(String),
+
+    #[error("Admin API error: {0}")]
+    Admin(String),
 }
 
 pub type Result<T> = std::result::Result<T, KlagError>;

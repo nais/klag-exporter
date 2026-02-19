@@ -6,6 +6,7 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
 use rdkafka::Offset;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 use tracing::{debug, instrument, warn};
 
@@ -16,27 +17,44 @@ pub struct TimestampFetchResult {
     pub timestamp_ms: i64,
 }
 
-/// Factory for creating consumers. Creates a fresh consumer for each fetch
-/// to avoid state conflicts when fetching timestamps concurrently.
+/// Pool-based timestamp consumer. Maintains a pool of reusable BaseConsumers
+/// to avoid connection churn (TCP/TLS/SASL handshake per fetch).
 pub struct TimestampConsumer {
     config: ClusterConfig,
     cluster_name: String,
     fetch_timeout: Duration,
     consumer_counter: AtomicU64,
+    pool: Mutex<Vec<BaseConsumer>>,
+    pool_size: usize,
 }
 
 impl TimestampConsumer {
-    pub fn new(config: &ClusterConfig) -> Result<Self> {
-        Ok(Self {
+    pub fn with_pool_size(config: &ClusterConfig, pool_size: usize) -> Result<Self> {
+        let mut consumer = Self {
             config: config.clone(),
             cluster_name: config.name.clone(),
             fetch_timeout: Duration::from_secs(5),
             consumer_counter: AtomicU64::new(0),
-        })
+            pool: Mutex::new(Vec::with_capacity(pool_size)),
+            pool_size,
+        };
+
+        // Pre-populate the pool
+        for _ in 0..pool_size {
+            let c = consumer.create_consumer()?;
+            consumer.pool.get_mut().unwrap().push(c);
+        }
+
+        debug!(
+            cluster = %consumer.cluster_name,
+            pool_size = pool_size,
+            "Created timestamp consumer pool"
+        );
+
+        Ok(consumer)
     }
 
-    /// Create a fresh consumer for a single fetch operation.
-    /// Each consumer gets a unique client.id to avoid broker-side conflicts.
+    /// Create a consumer for the pool.
     fn create_consumer(&self) -> Result<BaseConsumer> {
         let counter = self.consumer_counter.fetch_add(1, Ordering::Relaxed);
 
@@ -64,6 +82,40 @@ impl TimestampConsumer {
         client_config.create().map_err(KlagError::Kafka)
     }
 
+    /// Take a consumer from the pool, or create a new one if the pool is empty.
+    fn acquire(&self) -> Result<BaseConsumer> {
+        let mut pool = self
+            .pool
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(consumer) = pool.pop() {
+            Ok(consumer)
+        } else {
+            // Pool exhausted (more concurrent fetches than pool_size); create a temporary one
+            self.create_consumer()
+        }
+    }
+
+    /// Return a consumer to the pool. If the pool is full, the consumer is dropped.
+    fn release(&self, consumer: BaseConsumer) {
+        // Unassign before returning to pool to clear any partition state
+        let empty = rdkafka::TopicPartitionList::new();
+        if let Err(e) = consumer.assign(&empty) {
+            warn!(error = %e, "Failed to unassign consumer before returning to pool");
+            // Don't return a broken consumer to the pool
+            return;
+        }
+
+        let mut pool = self
+            .pool
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pool.len() < self.pool_size {
+            pool.push(consumer);
+        }
+        // else: pool is full, consumer is dropped
+    }
+
     #[instrument(skip(self), fields(cluster = %self.cluster_name, topic = %tp.topic, partition = tp.partition, offset = offset))]
     pub fn fetch_timestamp(
         &self,
@@ -72,8 +124,26 @@ impl TimestampConsumer {
     ) -> Result<Option<TimestampFetchResult>> {
         use rdkafka::TopicPartitionList;
 
-        // Create a fresh consumer for this fetch to avoid state conflicts
-        let consumer = self.create_consumer()?;
+        let consumer = self.acquire()?;
+
+        // RAII guard ensures consumer is returned to pool even on panic
+        struct PoolGuard<'a> {
+            consumer: Option<BaseConsumer>,
+            pool: &'a TimestampConsumer,
+        }
+        impl<'a> Drop for PoolGuard<'a> {
+            fn drop(&mut self) {
+                if let Some(consumer) = self.consumer.take() {
+                    self.pool.release(consumer);
+                }
+            }
+        }
+
+        let guard = PoolGuard {
+            consumer: Some(consumer),
+            pool: self,
+        };
+        let consumer = guard.consumer.as_ref().unwrap();
 
         let mut tpl = TopicPartitionList::new();
         tpl.add_partition_offset(&tp.topic, tp.partition, Offset::Offset(offset))
@@ -81,8 +151,7 @@ impl TimestampConsumer {
 
         consumer.assign(&tpl).map_err(KlagError::Kafka)?;
 
-        // Poll for message - no seek needed since assign with offset already positions
-        match consumer.poll(self.fetch_timeout) {
+        let result = match consumer.poll(self.fetch_timeout) {
             Some(result) => match result {
                 Ok(msg) => {
                     let timestamp = msg.timestamp().to_millis();
@@ -117,8 +186,11 @@ impl TimestampConsumer {
                 );
                 Ok(None)
             }
-        }
-        // Consumer is dropped here, cleaning up resources
+        };
+
+        // Take consumer out of guard so drop still returns it to pool
+        // (guard.drop() handles the release)
+        result
     }
 
     #[allow(dead_code)]
@@ -140,6 +212,7 @@ impl std::fmt::Debug for TimestampConsumer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TimestampConsumer")
             .field("cluster", &self.cluster_name)
+            .field("pool_size", &self.pool_size)
             .finish()
     }
 }

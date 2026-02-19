@@ -1,0 +1,42 @@
+# OpenTelemetry Collector configuration for klag-exporter test stack
+# Receives OTLP metrics from klag-exporter and exports to multiple backends
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 10s
+    send_batch_size: 1024
+
+exporters:
+  # Debug exporter - logs metrics to stdout
+  debug:
+    verbosity: detailed
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+  # Prometheus exporter - makes metrics scrapable at :8889/metrics
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: klag
+    const_labels:
+      source: otel_collector
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug, prometheus]
+
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      address: 0.0.0.0:8888

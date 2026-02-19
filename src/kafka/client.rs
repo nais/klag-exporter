@@ -8,6 +8,8 @@ use rdkafka::groups::GroupList;
 use rdkafka::metadata::Metadata;
 use rdkafka::TopicPartitionList;
 use std::collections::{HashMap, HashSet};
+use std::ffi::{CStr, CString};
+use std::os::raw::c_char;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -65,7 +67,7 @@ pub enum OffsetPosition {
 
 pub struct KafkaClient {
     admin: AdminClient<DefaultClientContext>,
-    consumer: BaseConsumer,
+    consumer: Arc<BaseConsumer>,
     config: ClusterConfig,
     timeout: Duration,
     performance: PerformanceConfig,
@@ -108,7 +110,7 @@ impl KafkaClient {
 
         Ok(Self {
             admin,
-            consumer,
+            consumer: Arc::new(consumer),
             config: config.clone(),
             timeout,
             performance,
@@ -122,14 +124,6 @@ impl KafkaClient {
 
     pub fn cluster_name(&self) -> &str {
         &self.config.name
-    }
-
-    pub fn consumer_properties(&self) -> &HashMap<String, String> {
-        &self.config.consumer_properties
-    }
-
-    pub fn bootstrap_servers(&self) -> &str {
-        &self.config.bootstrap_servers
     }
 
     #[instrument(skip(self), fields(cluster = %self.config.name))]
@@ -193,39 +187,230 @@ impl KafkaClient {
         Ok(descriptions)
     }
 
-    #[allow(dead_code)]
-    #[instrument(skip(self), fields(cluster = %self.config.name, group = %group_id))]
+    /// Fetch committed offsets for a consumer group using the Admin API.
+    /// Uses the existing AdminClient connection — no additional consumers/FDs needed.
+    #[instrument(skip(self, partitions), fields(cluster = %self.config.name, group = %group_id))]
     pub fn list_consumer_group_offsets(
         &self,
         group_id: &str,
+        partitions: &[TopicPartition],
+        timeout: Duration,
     ) -> Result<HashMap<TopicPartition, i64>> {
-        let metadata = self.fetch_metadata()?;
-        let mut tpl = TopicPartitionList::new();
+        use rdkafka::bindings::*;
 
-        for topic in metadata.topics() {
-            for partition in topic.partitions() {
-                tpl.add_partition(topic.name(), partition.id());
+        let group_cstr = CString::new(group_id)
+            .map_err(|e| KlagError::Admin(format!("Invalid group_id contains null byte: {e}")))?;
+        let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+
+        unsafe {
+            // Get the native rd_kafka_t handle from the AdminClient
+            let rk = self.admin.inner().native_ptr();
+
+            // Build the C topic-partition list from our partitions
+            let c_tpl = rd_kafka_topic_partition_list_new(partitions.len() as i32);
+            if c_tpl.is_null() {
+                return Err(KlagError::Admin(
+                    "Failed to create topic partition list".into(),
+                ));
             }
-        }
 
-        let committed = self
-            .consumer
-            .committed_offsets(tpl, self.timeout)
-            .map_err(KlagError::Kafka)?;
-
-        let mut offsets = HashMap::new();
-        for elem in committed.elements() {
-            if let rdkafka::Offset::Offset(offset) = elem.offset() {
-                offsets.insert(TopicPartition::new(elem.topic(), elem.partition()), offset);
+            // RAII guard to clean up all C resources on any exit path
+            struct Cleanup {
+                tpl: *mut rd_kafka_topic_partition_list_t,
+                request: *mut rd_kafka_ListConsumerGroupOffsets_t,
+                options: *mut rd_kafka_AdminOptions_t,
+                queue: *mut rd_kafka_queue_t,
+                event: *mut rd_kafka_event_t,
+                // CStrings kept alive for the duration of the FFI call
+                _topic_cstrings: Vec<CString>,
             }
-        }
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    unsafe {
+                        if !self.event.is_null() {
+                            rd_kafka_event_destroy(self.event);
+                        }
+                        if !self.queue.is_null() {
+                            rd_kafka_queue_destroy(self.queue);
+                        }
+                        if !self.options.is_null() {
+                            rd_kafka_AdminOptions_destroy(self.options);
+                        }
+                        if !self.request.is_null() {
+                            rd_kafka_ListConsumerGroupOffsets_destroy(self.request);
+                        }
+                        // tpl ownership is transferred to the request via
+                        // rd_kafka_ListConsumerGroupOffsets_new, which copies it.
+                        // We still own the original and must free it.
+                        if !self.tpl.is_null() {
+                            rd_kafka_topic_partition_list_destroy(self.tpl);
+                        }
+                    }
+                }
+            }
 
-        debug!(
-            group = group_id,
-            partitions = offsets.len(),
-            "Fetched committed offsets"
-        );
-        Ok(offsets)
+            let mut cleanup = Cleanup {
+                tpl: c_tpl,
+                request: std::ptr::null_mut(),
+                options: std::ptr::null_mut(),
+                queue: std::ptr::null_mut(),
+                event: std::ptr::null_mut(),
+                _topic_cstrings: Vec::with_capacity(partitions.len()),
+            };
+
+            // Populate the partition list
+            for tp in partitions {
+                let topic_cstr = CString::new(tp.topic.as_str())
+                    .map_err(|e| KlagError::Admin(format!("Topic name contains null byte: {e}")))?;
+                cleanup._topic_cstrings.push(topic_cstr);
+                let cstr_ptr = cleanup._topic_cstrings.last().unwrap().as_ptr();
+                rd_kafka_topic_partition_list_add(c_tpl, cstr_ptr, tp.partition);
+            }
+
+            // Create the request object
+            let request = rd_kafka_ListConsumerGroupOffsets_new(group_cstr.as_ptr(), c_tpl);
+            if request.is_null() {
+                return Err(KlagError::Admin(
+                    "Failed to create ListConsumerGroupOffsets request".into(),
+                ));
+            }
+            cleanup.request = request;
+
+            // Create admin options with timeout
+            let options = rd_kafka_AdminOptions_new(
+                rk,
+                rd_kafka_admin_op_t::RD_KAFKA_ADMIN_OP_LISTCONSUMERGROUPOFFSETS,
+            );
+            if options.is_null() {
+                return Err(KlagError::Admin("Failed to create AdminOptions".into()));
+            }
+            cleanup.options = options;
+
+            let mut errstr_buf = [0 as c_char; 512];
+            let err = rd_kafka_AdminOptions_set_request_timeout(
+                options,
+                timeout_ms,
+                errstr_buf.as_mut_ptr(),
+                errstr_buf.len(),
+            );
+            if err != rd_kafka_resp_err_t::RD_KAFKA_RESP_ERR_NO_ERROR {
+                let errstr = CStr::from_ptr(errstr_buf.as_ptr())
+                    .to_string_lossy()
+                    .to_string();
+                return Err(KlagError::Admin(format!(
+                    "Failed to set request timeout: {errstr}"
+                )));
+            }
+
+            // Create a temporary queue for the async result
+            let queue = rd_kafka_queue_new(rk);
+            if queue.is_null() {
+                return Err(KlagError::Admin("Failed to create queue".into()));
+            }
+            cleanup.queue = queue;
+
+            // Issue the async call
+            let mut request_ptr = request;
+            rd_kafka_ListConsumerGroupOffsets(rk, &mut request_ptr, 1, options, queue);
+            // After the call, the request is consumed; prevent double-free
+            cleanup.request = std::ptr::null_mut();
+
+            // Poll for the result event (blocks up to timeout)
+            let event = rd_kafka_queue_poll(queue, timeout_ms);
+            if event.is_null() {
+                return Err(KlagError::Admin(
+                    "ListConsumerGroupOffsets timed out".into(),
+                ));
+            }
+            cleanup.event = event;
+
+            // Verify it's the right event type
+            let event_type = rd_kafka_event_type(event);
+            if event_type != RD_KAFKA_EVENT_LISTCONSUMERGROUPOFFSETS_RESULT {
+                return Err(KlagError::Admin(format!(
+                    "Unexpected event type: {event_type}"
+                )));
+            }
+
+            // Check top-level error
+            let resp_err = rd_kafka_event_error(event);
+            if resp_err != rd_kafka_resp_err_t::RD_KAFKA_RESP_ERR_NO_ERROR {
+                let err_cstr = rd_kafka_event_error_string(event);
+                let err_msg = if err_cstr.is_null() {
+                    "unknown error".to_string()
+                } else {
+                    CStr::from_ptr(err_cstr).to_string_lossy().to_string()
+                };
+                return Err(KlagError::Admin(format!(
+                    "ListConsumerGroupOffsets failed: {err_msg}"
+                )));
+            }
+
+            // Extract the result
+            let result = rd_kafka_event_ListConsumerGroupOffsets_result(event);
+            if result.is_null() {
+                return Err(KlagError::Admin(
+                    "ListConsumerGroupOffsets result is null".into(),
+                ));
+            }
+
+            let mut n_groups: usize = 0;
+            let groups_ptr = rd_kafka_ListConsumerGroupOffsets_result_groups(result, &mut n_groups);
+
+            let mut offsets = HashMap::new();
+
+            if groups_ptr.is_null() || n_groups == 0 {
+                debug!(group = group_id, "No group results returned from Admin API");
+                return Ok(offsets);
+            }
+
+            for i in 0..n_groups {
+                let group = *groups_ptr.add(i);
+
+                // Check per-group error
+                let group_error = rd_kafka_group_result_error(group);
+                if !group_error.is_null() {
+                    let code = rd_kafka_error_code(group_error);
+                    if code != rd_kafka_resp_err_t::RD_KAFKA_RESP_ERR_NO_ERROR {
+                        let err_str = rd_kafka_error_string(group_error);
+                        let msg = if err_str.is_null() {
+                            "unknown".to_string()
+                        } else {
+                            CStr::from_ptr(err_str).to_string_lossy().to_string()
+                        };
+                        warn!(group = group_id, error = %msg, "Group result error");
+                        continue;
+                    }
+                }
+
+                let result_partitions = rd_kafka_group_result_partitions(group);
+                if result_partitions.is_null() {
+                    continue;
+                }
+
+                let cnt = (*result_partitions).cnt;
+                let elems = (*result_partitions).elems;
+                if elems.is_null() {
+                    continue;
+                }
+
+                for j in 0..cnt {
+                    let elem = &*elems.add(j as usize);
+                    // offset == -1001 (RD_KAFKA_OFFSET_INVALID) means no committed offset
+                    if elem.offset >= 0 && !elem.topic.is_null() {
+                        let topic = CStr::from_ptr(elem.topic).to_string_lossy().to_string();
+                        offsets.insert(TopicPartition::new(topic, elem.partition), elem.offset);
+                    }
+                }
+            }
+
+            debug!(
+                group = group_id,
+                partitions = offsets.len(),
+                "Fetched committed offsets via Admin API"
+            );
+            Ok(offsets)
+        }
     }
 
     #[instrument(skip(self), fields(cluster = %self.config.name))]
@@ -346,59 +531,25 @@ impl KafkaClient {
 
         // Use semaphore to limit concurrency
         let semaphore = Arc::new(Semaphore::new(max_concurrent));
-        let bootstrap_servers = self.config.bootstrap_servers.clone();
-        let consumer_properties = self.config.consumer_properties.clone();
+        let consumer = Arc::clone(&self.consumer);
         let timeout = self.timeout;
-        let cluster_name = self.config.name.clone();
 
         let mut handles = Vec::with_capacity(partitions.len());
 
         for (topic, partition) in partitions {
             let semaphore_clone = semaphore.clone();
-            let bootstrap = bootstrap_servers.clone();
-            let props = consumer_properties.clone();
-            let cluster = cluster_name.clone();
+            let consumer_clone = Arc::clone(&consumer);
 
-            // Spawn async task that properly awaits the semaphore before spawning blocking work
             let handle = tokio::spawn(async move {
-                // Acquire permit - this properly awaits until one is available
                 let permit: OwnedSemaphorePermit = semaphore_clone
                     .acquire_owned()
                     .await
                     .expect("semaphore closed");
 
-                // Now spawn the blocking task with the permit held
                 tokio::task::spawn_blocking(move || {
-                    let _permit = permit; // Hold permit until blocking work completes
+                    let _permit = permit;
 
-                    // Create a temporary consumer for this fetch
-                    let mut client_config = ClientConfig::new();
-                    client_config.set("bootstrap.servers", &bootstrap);
-                    client_config.set(
-                        "client.id",
-                        format!("klag-wm-{}-{}-{}", cluster, topic, partition),
-                    );
-                    client_config.set("group.id", format!("klag-wm-internal-{}", cluster));
-                    client_config.set("enable.auto.commit", "false");
-
-                    for (key, value) in &props {
-                        client_config.set(key, value);
-                    }
-
-                    let consumer: BaseConsumer = match client_config.create() {
-                        Ok(c) => c,
-                        Err(e) => {
-                            warn!(
-                                topic = topic,
-                                partition = partition,
-                                error = %e,
-                                "Failed to create consumer for watermark fetch"
-                            );
-                            return None;
-                        }
-                    };
-
-                    match consumer.fetch_watermarks(&topic, partition, timeout) {
+                    match consumer_clone.fetch_watermarks(&topic, partition, timeout) {
                         Ok((low, high)) => {
                             Some((TopicPartition::new(&topic, partition), (low, high)))
                         }
