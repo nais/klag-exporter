@@ -1087,7 +1087,7 @@ dependencies = [
  "hyper",
  "libc",
  "pin-project-lite",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -1940,7 +1940,7 @@ dependencies = [
 [[package]]
 name = "rdkafka"
 version = "0.39.0"
-source = "git+https://github.com/x10an14-nav/rust-rdkafka#9e0cb9f6fbb97dc7909694d28a0d07347d24014e"
+source = "git+https://github.com/x10an14-nav/rust-rdkafka#b424f2bec1ceb0bdab773ebce27ab0e47b12ba23"
 dependencies = [
  "futures-channel",
  "futures-util",
@@ -1957,7 +1957,7 @@ dependencies = [
 [[package]]
 name = "rdkafka-sys"
 version = "4.10.0+2.12.1"
-source = "git+https://github.com/x10an14-nav/rust-rdkafka#9e0cb9f6fbb97dc7909694d28a0d07347d24014e"
+source = "git+https://github.com/x10an14-nav/rust-rdkafka#b424f2bec1ceb0bdab773ebce27ab0e47b12ba23"
 dependencies = [
  "cmake",
  "libc",
