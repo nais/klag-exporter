@@ -14,31 +14,11 @@ pub enum KlagError {
     #[error("Regex error: {0}")]
     Regex(#[from] regex::Error),
 
-    #[allow(dead_code)]
-    #[error("Invalid offset: {0}")]
-    InvalidOffset(String),
-
-    #[allow(dead_code)]
-    #[error("Timeout: {0}")]
-    Timeout(String),
-
-    #[allow(dead_code)]
-    #[error("Channel error: {0}")]
-    Channel(String),
-
     #[error("HTTP server error: {0}")]
     Http(String),
 
     #[error("OpenTelemetry error: {0}")]
     Otel(String),
-
-    #[allow(dead_code)]
-    #[error("Leadership error: {0}")]
-    Leadership(String),
-
-    #[allow(dead_code)]
-    #[error("Admin API error: {0}")]
-    Admin(String),
 }
 
 pub type Result<T> = std::result::Result<T, KlagError>;

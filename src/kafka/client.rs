@@ -29,10 +29,6 @@ impl TopicPartition {
 #[derive(Debug, Clone)]
 pub struct ConsumerGroupInfo {
     pub group_id: String,
-    #[allow(dead_code)]
-    pub protocol_type: String,
-    #[allow(dead_code)]
-    pub state: String,
 }
 
 #[derive(Debug, Clone)]
@@ -46,11 +42,6 @@ pub struct GroupMemberInfo {
 #[derive(Debug, Clone)]
 pub struct GroupDescription {
     pub group_id: String,
-    pub state: String,
-    #[allow(dead_code)]
-    pub protocol_type: String,
-    #[allow(dead_code)]
-    pub protocol: String,
     pub members: Vec<GroupMemberInfo>,
 }
 
@@ -63,13 +54,6 @@ pub struct KafkaClient {
 }
 
 impl KafkaClient {
-    /// Create a new `KafkaClient` with default performance config.
-    /// Prefer `with_performance` for large clusters.
-    #[allow(dead_code)]
-    pub fn new(config: &ClusterConfig) -> Result<Self> {
-        Self::with_performance(config, PerformanceConfig::default())
-    }
-
     pub fn with_performance(
         config: &ClusterConfig,
         performance: PerformanceConfig,
@@ -106,15 +90,6 @@ impl KafkaClient {
         })
     }
 
-    #[allow(dead_code)]
-    pub const fn performance(&self) -> &PerformanceConfig {
-        &self.performance
-    }
-
-    pub fn cluster_name(&self) -> &str {
-        &self.config.name
-    }
-
     #[instrument(skip(self), fields(cluster = %self.config.name))]
     pub fn list_consumer_groups(&self) -> Result<Vec<ConsumerGroupInfo>> {
         let group_list: GroupList = self
@@ -127,8 +102,6 @@ impl KafkaClient {
             .iter()
             .map(|g| ConsumerGroupInfo {
                 group_id: g.name().to_string(),
-                protocol_type: g.protocol_type().to_string(),
-                state: g.state().to_string(),
             })
             .collect();
 
@@ -141,52 +114,52 @@ impl KafkaClient {
         &self,
         group_ids: &[&str],
     ) -> Result<Vec<GroupDescription>> {
-        let opts = self.admin_options();
-        let results = self
-            .admin
-            .describe_consumer_groups(group_ids.iter(), &opts)
-            .await
-            .map_err(KlagError::Kafka)?;
-
+        let batch_size = self.performance.describe_groups_batch_size;
         let mut descriptions = Vec::with_capacity(group_ids.len());
 
-        for result in results {
-            match result {
-                Ok(desc) => {
-                    let members = desc
-                        .members
-                        .into_iter()
-                        .map(|m| {
-                            let assignments = m
-                                .assignment
-                                .map(|a| {
-                                    a.partitions
-                                        .elements()
-                                        .iter()
-                                        .map(|e| TopicPartition::new(e.topic(), e.partition()))
-                                        .collect()
-                                })
-                                .unwrap_or_default();
+        for chunk in group_ids.chunks(batch_size) {
+            let opts = self.admin_options();
+            let results = self
+                .admin
+                .describe_consumer_groups(chunk.iter(), &opts)
+                .await
+                .map_err(KlagError::Kafka)?;
 
-                            GroupMemberInfo {
-                                member_id: m.consumer_id,
-                                client_id: m.client_id,
-                                client_host: m.host,
-                                assignments,
-                            }
-                        })
-                        .collect();
+            for result in results {
+                match result {
+                    Ok(desc) => {
+                        let members = desc
+                            .members
+                            .into_iter()
+                            .map(|m| {
+                                let assignments = m
+                                    .assignment
+                                    .map(|a| {
+                                        a.partitions
+                                            .elements()
+                                            .iter()
+                                            .map(|e| TopicPartition::new(e.topic(), e.partition()))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
 
-                    descriptions.push(GroupDescription {
-                        group_id: desc.group_id,
-                        state: format!("{:?}", desc.state),
-                        protocol_type: desc.partition_assignor.clone(),
-                        protocol: desc.partition_assignor,
-                        members,
-                    });
-                }
-                Err((group_id, err)) => {
-                    warn!(group = %group_id, error = %err, "Failed to describe consumer group");
+                                GroupMemberInfo {
+                                    member_id: m.consumer_id,
+                                    client_id: m.client_id,
+                                    client_host: m.host,
+                                    assignments,
+                                }
+                            })
+                            .collect();
+
+                        descriptions.push(GroupDescription {
+                            group_id: desc.group_id,
+                            members,
+                        });
+                    }
+                    Err((group_id, err)) => {
+                        warn!(group = %group_id, error = %err, "Failed to describe consumer group");
+                    }
                 }
             }
         }
@@ -247,38 +220,33 @@ impl KafkaClient {
             .map_err(KlagError::Kafka)
     }
 
-    /// Fetch watermarks for all partitions in parallel using the Admin API.
-    /// Uses two batched `list_offsets` calls (earliest + latest) instead of per-partition `fetch_watermarks`.
-    #[instrument(skip(self))]
-    pub async fn fetch_all_watermarks_parallel(
+    /// Fetch watermarks for only the specified partitions using the Admin API.
+    /// Avoids fetching metadata for all topics — only queries the given partition set.
+    #[instrument(skip(self, partitions), fields(cluster = %self.config.name, count = partitions.len()))]
+    pub async fn fetch_watermarks_for_partitions(
         &self,
+        partitions: &HashSet<TopicPartition>,
     ) -> Result<HashMap<TopicPartition, (i64, i64)>> {
-        let metadata = self.fetch_metadata()?;
-
-        // Build TopicPartitionList with all partitions
         let mut tpl_earliest = TopicPartitionList::new();
         let mut tpl_latest = TopicPartitionList::new();
 
-        for topic in metadata.topics() {
-            for partition in topic.partitions() {
-                tpl_earliest
-                    .add_partition_offset(topic.name(), partition.id(), rdkafka::Offset::Beginning)
-                    .map_err(KlagError::Kafka)?;
-                tpl_latest
-                    .add_partition_offset(topic.name(), partition.id(), rdkafka::Offset::End)
-                    .map_err(KlagError::Kafka)?;
-            }
+        for tp in partitions {
+            tpl_earliest
+                .add_partition_offset(&tp.topic, tp.partition, rdkafka::Offset::Beginning)
+                .map_err(KlagError::Kafka)?;
+            tpl_latest
+                .add_partition_offset(&tp.topic, tp.partition, rdkafka::Offset::End)
+                .map_err(KlagError::Kafka)?;
         }
 
-        let total_partitions = tpl_earliest.count();
+        let total = tpl_earliest.count();
         debug!(
-            partitions = total_partitions,
-            "Fetching watermarks via Admin API list_offsets"
+            partitions = total,
+            "Fetching targeted watermarks via Admin API"
         );
 
         let opts = self.admin_options();
 
-        // Issue both calls concurrently
         let (earliest_results, latest_results) = futures::future::try_join(
             self.admin.list_offsets(&tpl_earliest, &opts),
             self.admin.list_offsets(&tpl_latest, &opts),
@@ -286,7 +254,6 @@ impl KafkaClient {
         .await
         .map_err(KlagError::Kafka)?;
 
-        // Build earliest offsets map
         let mut earliest_map: HashMap<(String, i32), i64> = HashMap::new();
         for result in earliest_results {
             match result {
@@ -301,7 +268,6 @@ impl KafkaClient {
             }
         }
 
-        // Build combined watermarks map from latest results
         let mut watermarks = HashMap::new();
         for result in latest_results {
             match result {
@@ -325,16 +291,11 @@ impl KafkaClient {
 
         debug!(
             fetched = watermarks.len(),
-            total = total_partitions,
-            "Admin API watermark fetch completed"
+            requested = total,
+            "Targeted watermark fetch completed"
         );
 
         Ok(watermarks)
-    }
-
-    #[allow(dead_code)]
-    pub const fn inner_admin(&self) -> &AdminClient<DefaultClientContext> {
-        &self.admin
     }
 
     pub fn admin_options(&self) -> AdminOptions {
@@ -411,6 +372,6 @@ impl std::fmt::Debug for KafkaClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KafkaClient")
             .field("cluster", &self.config.name)
-            .finish()
+            .finish_non_exhaustive()
     }
 }

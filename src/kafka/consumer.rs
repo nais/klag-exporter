@@ -42,7 +42,11 @@ impl TimestampConsumer {
         // Pre-populate the pool
         for _ in 0..pool_size {
             let c = consumer.create_consumer()?;
-            consumer.pool.get_mut().unwrap().push(c);
+            consumer
+                .pool
+                .get_mut()
+                .expect("pool mutex poisoned")
+                .push(c);
         }
 
         debug!(
@@ -136,7 +140,10 @@ impl TimestampConsumer {
             consumer: Some(consumer),
             pool: self,
         };
-        let consumer = guard.consumer.as_ref().unwrap();
+        let consumer = guard
+            .consumer
+            .as_ref()
+            .expect("consumer already taken from guard");
 
         let mut tpl = TopicPartitionList::new();
         tpl.add_partition_offset(&tp.topic, tp.partition, Offset::Offset(offset))
@@ -185,20 +192,6 @@ impl TimestampConsumer {
         // (guard.drop() handles the release)
         result
     }
-
-    #[allow(dead_code)]
-    pub fn fetch_timestamps_batch(
-        &self,
-        requests: &[(TopicPartition, i64)],
-    ) -> Vec<(TopicPartition, Result<Option<TimestampFetchResult>>)> {
-        requests
-            .iter()
-            .map(|(tp, offset)| {
-                let result = self.fetch_timestamp(tp, *offset);
-                (tp.clone(), result)
-            })
-            .collect()
-    }
 }
 
 impl std::fmt::Debug for TimestampConsumer {
@@ -206,6 +199,6 @@ impl std::fmt::Debug for TimestampConsumer {
         f.debug_struct("TimestampConsumer")
             .field("cluster", &self.cluster_name)
             .field("pool_size", &self.pool_size)
-            .finish()
+            .finish_non_exhaustive()
     }
 }

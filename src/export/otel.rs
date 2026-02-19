@@ -30,372 +30,8 @@ pub async fn run_otel_exporter(
     global::set_meter_provider(meter_provider.clone());
     let meter = global::meter("klag-exporter");
 
-    // Create observable gauges for all metrics
-    let registry_clone = Arc::clone(&registry);
-    let _partition_latest = meter
-        .f64_observable_gauge("kafka_partition_latest_offset")
-        .with_description("Latest offset for a partition")
-        .with_callback({
-            let reg = Arc::clone(&registry_clone);
-            move |observer| {
-                for metric in reg.get_otel_metrics() {
-                    if metric.name == "kafka_partition_latest_offset" {
-                        for dp in &metric.data_points {
-                            let attrs: Vec<KeyValue> = dp
-                                .attributes
-                                .iter()
-                                .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
-                                .collect();
-                            observer.observe(dp.value, &attrs);
-                        }
-                    }
-                }
-            }
-        })
-        .build();
-
-    let registry_clone = Arc::clone(&registry);
-    let _partition_earliest = meter
-        .f64_observable_gauge("kafka_partition_earliest_offset")
-        .with_description("Earliest offset for a partition")
-        .with_callback({
-            let reg = Arc::clone(&registry_clone);
-            move |observer| {
-                for metric in reg.get_otel_metrics() {
-                    if metric.name == "kafka_partition_earliest_offset" {
-                        for dp in &metric.data_points {
-                            let attrs: Vec<KeyValue> = dp
-                                .attributes
-                                .iter()
-                                .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
-                                .collect();
-                            observer.observe(dp.value, &attrs);
-                        }
-                    }
-                }
-            }
-        })
-        .build();
-
-    let registry_clone = Arc::clone(&registry);
-    let _group_offset = meter
-        .f64_observable_gauge("kafka_consumergroup_group_offset")
-        .with_description("Current committed offset of a consumer group for a partition")
-        .with_callback({
-            let reg = Arc::clone(&registry_clone);
-            move |observer| {
-                for metric in reg.get_otel_metrics() {
-                    if metric.name == "kafka_consumergroup_group_offset" {
-                        for dp in &metric.data_points {
-                            let attrs: Vec<KeyValue> = dp
-                                .attributes
-                                .iter()
-                                .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
-                                .collect();
-                            observer.observe(dp.value, &attrs);
-                        }
-                    }
-                }
-            }
-        })
-        .build();
-
-    let registry_clone = Arc::clone(&registry);
-    let _group_lag = meter
-        .f64_observable_gauge("kafka_consumergroup_group_lag")
-        .with_description("Current lag of a consumer group for a partition")
-        .with_callback({
-            let reg = Arc::clone(&registry_clone);
-            move |observer| {
-                for metric in reg.get_otel_metrics() {
-                    if metric.name == "kafka_consumergroup_group_lag" {
-                        for dp in &metric.data_points {
-                            let attrs: Vec<KeyValue> = dp
-                                .attributes
-                                .iter()
-                                .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
-                                .collect();
-                            observer.observe(dp.value, &attrs);
-                        }
-                    }
-                }
-            }
-        })
-        .build();
-
-    let registry_clone = Arc::clone(&registry);
-    let _group_lag_seconds = meter
-        .f64_observable_gauge("kafka_consumergroup_group_lag_seconds")
-        .with_description("Time lag in seconds for a consumer group partition")
-        .with_callback({
-            let reg = Arc::clone(&registry_clone);
-            move |observer| {
-                for metric in reg.get_otel_metrics() {
-                    if metric.name == "kafka_consumergroup_group_lag_seconds" {
-                        for dp in &metric.data_points {
-                            let attrs: Vec<KeyValue> = dp
-                                .attributes
-                                .iter()
-                                .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
-                                .collect();
-                            observer.observe(dp.value, &attrs);
-                        }
-                    }
-                }
-            }
-        })
-        .build();
-
-    let registry_clone = Arc::clone(&registry);
-    let _group_max_lag = meter
-        .f64_observable_gauge("kafka_consumergroup_group_max_lag")
-        .with_description("Maximum lag across all partitions for a consumer group")
-        .with_callback({
-            let reg = Arc::clone(&registry_clone);
-            move |observer| {
-                for metric in reg.get_otel_metrics() {
-                    if metric.name == "kafka_consumergroup_group_max_lag" {
-                        for dp in &metric.data_points {
-                            let attrs: Vec<KeyValue> = dp
-                                .attributes
-                                .iter()
-                                .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
-                                .collect();
-                            observer.observe(dp.value, &attrs);
-                        }
-                    }
-                }
-            }
-        })
-        .build();
-
-    let registry_clone = Arc::clone(&registry);
-    let _group_sum_lag = meter
-        .f64_observable_gauge("kafka_consumergroup_group_sum_lag")
-        .with_description("Sum of lag across all partitions for a consumer group")
-        .with_callback({
-            let reg = Arc::clone(&registry_clone);
-            move |observer| {
-                for metric in reg.get_otel_metrics() {
-                    if metric.name == "kafka_consumergroup_group_sum_lag" {
-                        for dp in &metric.data_points {
-                            let attrs: Vec<KeyValue> = dp
-                                .attributes
-                                .iter()
-                                .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
-                                .collect();
-                            observer.observe(dp.value, &attrs);
-                        }
-                    }
-                }
-            }
-        })
-        .build();
-
-    let registry_clone = Arc::clone(&registry);
-    let _group_max_lag_seconds = meter
-        .f64_observable_gauge("kafka_consumergroup_group_max_lag_seconds")
-        .with_description("Maximum time lag in seconds across all partitions")
-        .with_callback({
-            let reg = Arc::clone(&registry_clone);
-            move |observer| {
-                for metric in reg.get_otel_metrics() {
-                    if metric.name == "kafka_consumergroup_group_max_lag_seconds" {
-                        for dp in &metric.data_points {
-                            let attrs: Vec<KeyValue> = dp
-                                .attributes
-                                .iter()
-                                .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
-                                .collect();
-                            observer.observe(dp.value, &attrs);
-                        }
-                    }
-                }
-            }
-        })
-        .build();
-
-    let registry_clone = Arc::clone(&registry);
-    let _group_topic_sum_lag = meter
-        .f64_observable_gauge("kafka_consumergroup_group_topic_sum_lag")
-        .with_description("Sum of lag for a consumer group per topic")
-        .with_callback({
-            let reg = Arc::clone(&registry_clone);
-            move |observer| {
-                for metric in reg.get_otel_metrics() {
-                    if metric.name == "kafka_consumergroup_group_topic_sum_lag" {
-                        for dp in &metric.data_points {
-                            let attrs: Vec<KeyValue> = dp
-                                .attributes
-                                .iter()
-                                .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
-                                .collect();
-                            observer.observe(dp.value, &attrs);
-                        }
-                    }
-                }
-            }
-        })
-        .build();
-
-    let registry_clone = Arc::clone(&registry);
-    let _poll_time = meter
-        .f64_observable_gauge("kafka_consumergroup_poll_time_ms")
-        .with_description("Time taken to collect consumer group metrics in milliseconds")
-        .with_callback({
-            let reg = Arc::clone(&registry_clone);
-            move |observer| {
-                for metric in reg.get_otel_metrics() {
-                    if metric.name == "kafka_consumergroup_poll_time_ms" {
-                        for dp in &metric.data_points {
-                            let attrs: Vec<KeyValue> = dp
-                                .attributes
-                                .iter()
-                                .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
-                                .collect();
-                            observer.observe(dp.value, &attrs);
-                        }
-                    }
-                }
-            }
-        })
-        .build();
-
-    let registry_clone = Arc::clone(&registry);
-    let _scrape_duration = meter
-        .f64_observable_gauge("kafka_lag_exporter_scrape_duration_seconds")
-        .with_description("Duration of the last metrics collection in seconds")
-        .with_callback({
-            let reg = Arc::clone(&registry_clone);
-            move |observer| {
-                for metric in reg.get_otel_metrics() {
-                    if metric.name == "kafka_lag_exporter_scrape_duration_seconds" {
-                        for dp in &metric.data_points {
-                            let attrs: Vec<KeyValue> = dp
-                                .attributes
-                                .iter()
-                                .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
-                                .collect();
-                            observer.observe(dp.value, &attrs);
-                        }
-                    }
-                }
-            }
-        })
-        .build();
-
-    let _exporter_up = meter
-        .f64_observable_gauge("kafka_lag_exporter_up")
-        .with_description("Whether the Kafka lag exporter is healthy")
-        .with_callback({
-            let reg = Arc::clone(&registry);
-            move |observer| {
-                for metric in reg.get_otel_metrics() {
-                    if metric.name == "kafka_lag_exporter_up" {
-                        for dp in &metric.data_points {
-                            let attrs: Vec<KeyValue> = dp
-                                .attributes
-                                .iter()
-                                .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
-                                .collect();
-                            observer.observe(dp.value, &attrs);
-                        }
-                    }
-                }
-            }
-        })
-        .build();
-
-    let registry_clone = Arc::clone(&registry);
-    let _messages_lost = meter
-        .f64_observable_gauge("kafka_consumergroup_group_messages_lost")
-        .with_description("Number of messages deleted by retention before consumer processed them")
-        .with_callback({
-            let reg = Arc::clone(&registry_clone);
-            move |observer| {
-                for metric in reg.get_otel_metrics() {
-                    if metric.name == "kafka_consumergroup_group_messages_lost" {
-                        for dp in &metric.data_points {
-                            let attrs: Vec<KeyValue> = dp
-                                .attributes
-                                .iter()
-                                .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
-                                .collect();
-                            observer.observe(dp.value, &attrs);
-                        }
-                    }
-                }
-            }
-        })
-        .build();
-
-    let registry_clone = Arc::clone(&registry);
-    let _retention_margin = meter
-        .f64_observable_gauge("kafka_consumergroup_group_retention_margin")
-        .with_description("Offset distance between consumer position and deletion boundary")
-        .with_callback({
-            let reg = Arc::clone(&registry_clone);
-            move |observer| {
-                for metric in reg.get_otel_metrics() {
-                    if metric.name == "kafka_consumergroup_group_retention_margin" {
-                        for dp in &metric.data_points {
-                            let attrs: Vec<KeyValue> = dp
-                                .attributes
-                                .iter()
-                                .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
-                                .collect();
-                            observer.observe(dp.value, &attrs);
-                        }
-                    }
-                }
-            }
-        })
-        .build();
-
-    let registry_clone = Arc::clone(&registry);
-    let _lag_retention_ratio = meter
-        .f64_observable_gauge("kafka_consumergroup_group_lag_retention_ratio")
-        .with_description("Percentage of retention window occupied by consumer lag")
-        .with_callback({
-            let reg = Arc::clone(&registry_clone);
-            move |observer| {
-                for metric in reg.get_otel_metrics() {
-                    if metric.name == "kafka_consumergroup_group_lag_retention_ratio" {
-                        for dp in &metric.data_points {
-                            let attrs: Vec<KeyValue> = dp
-                                .attributes
-                                .iter()
-                                .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
-                                .collect();
-                            observer.observe(dp.value, &attrs);
-                        }
-                    }
-                }
-            }
-        })
-        .build();
-
-    let _data_loss_partitions = meter
-        .f64_observable_gauge("kafka_lag_exporter_data_loss_partitions_total")
-        .with_description("Number of partitions where data loss occurred")
-        .with_callback({
-            let reg = Arc::clone(&registry);
-            move |observer| {
-                for metric in reg.get_otel_metrics() {
-                    if metric.name == "kafka_lag_exporter_data_loss_partitions_total" {
-                        for dp in &metric.data_points {
-                            let attrs: Vec<KeyValue> = dp
-                                .attributes
-                                .iter()
-                                .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
-                                .collect();
-                            observer.observe(dp.value, &attrs);
-                        }
-                    }
-                }
-            }
-        })
-        .build();
+    // Register all observable gauges using a shared helper
+    let _gauges = register_otel_gauges(&meter, &registry);
 
     info!("OpenTelemetry metrics registered, waiting for shutdown...");
 
@@ -409,6 +45,106 @@ pub async fn run_otel_exporter(
     }
 
     Ok(())
+}
+
+/// Gauge definition: (`metric_name`, description)
+const OTEL_GAUGE_DEFS: &[(&str, &str)] = &[
+    (
+        "kafka_partition_latest_offset",
+        "Latest offset for a partition",
+    ),
+    (
+        "kafka_partition_earliest_offset",
+        "Earliest offset for a partition",
+    ),
+    (
+        "kafka_consumergroup_group_offset",
+        "Current committed offset of a consumer group for a partition",
+    ),
+    (
+        "kafka_consumergroup_group_lag",
+        "Current lag of a consumer group for a partition",
+    ),
+    (
+        "kafka_consumergroup_group_lag_seconds",
+        "Time lag in seconds for a consumer group partition",
+    ),
+    (
+        "kafka_consumergroup_group_max_lag",
+        "Maximum lag across all partitions for a consumer group",
+    ),
+    (
+        "kafka_consumergroup_group_sum_lag",
+        "Sum of lag across all partitions for a consumer group",
+    ),
+    (
+        "kafka_consumergroup_group_max_lag_seconds",
+        "Maximum time lag in seconds across all partitions",
+    ),
+    (
+        "kafka_consumergroup_group_topic_sum_lag",
+        "Sum of lag for a consumer group per topic",
+    ),
+    (
+        "kafka_consumergroup_poll_time_ms",
+        "Time taken to collect consumer group metrics in milliseconds",
+    ),
+    (
+        "kafka_lag_exporter_scrape_duration_seconds",
+        "Duration of the last metrics collection in seconds",
+    ),
+    (
+        "kafka_lag_exporter_up",
+        "Whether the Kafka lag exporter is healthy",
+    ),
+    (
+        "kafka_consumergroup_group_messages_lost",
+        "Number of messages deleted by retention before consumer processed them",
+    ),
+    (
+        "kafka_consumergroup_group_retention_margin",
+        "Offset distance between consumer position and deletion boundary",
+    ),
+    (
+        "kafka_consumergroup_group_lag_retention_ratio",
+        "Percentage of retention window occupied by consumer lag",
+    ),
+    (
+        "kafka_lag_exporter_data_loss_partitions_total",
+        "Number of partitions where data loss occurred",
+    ),
+];
+
+/// Registers all `Otel` observable gauges, returning handles to keep them alive.
+fn register_otel_gauges(
+    meter: &opentelemetry::metrics::Meter,
+    registry: &Arc<MetricsRegistry>,
+) -> Vec<opentelemetry::metrics::ObservableGauge<f64>> {
+    OTEL_GAUGE_DEFS
+        .iter()
+        .map(|&(name, description)| {
+            let reg = Arc::clone(registry);
+            let metric_name = name.to_string();
+            meter
+                .f64_observable_gauge(name)
+                .with_description(description)
+                .with_callback(move |observer| {
+                    for metric in reg.get_otel_metrics() {
+                        if metric.name == metric_name {
+                            for dp in &metric.data_points {
+                                let attrs: Vec<KeyValue> = dp
+                                    .attributes
+                                    .iter()
+                                    .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
+                                    .collect();
+                                observer.observe(dp.value, &attrs);
+                            }
+                        }
+                    }
+                })
+                .build()
+        })
+        .collect()
 }
 
 fn init_meter_provider(
@@ -446,7 +182,7 @@ fn init_meter_provider(
 mod tests {
     use super::*;
 
-    // Note: Integration test for OTel exporter requires a running collector
+    // Note: Integration test for Otel exporter requires a running collector
     // This unit test just verifies the registry can be queried without panics
     #[test]
     fn test_otel_metrics_from_registry() {

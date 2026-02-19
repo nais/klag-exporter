@@ -89,21 +89,6 @@ impl TimestampSampler {
         }))
     }
 
-    #[allow(dead_code)]
-    #[allow(clippy::type_complexity)]
-    pub fn get_timestamps_batch(
-        &self,
-        requests: &[(String, TopicPartition, i64)],
-    ) -> Vec<((String, TopicPartition), Result<Option<TimestampResult>>)> {
-        requests
-            .iter()
-            .map(|(group_id, tp, offset)| {
-                let result = self.get_timestamp(group_id, tp, *offset);
-                ((group_id.clone(), tp.clone()), result)
-            })
-            .collect()
-    }
-
     pub fn clear_stale_entries(&self) {
         let now = Instant::now();
         self.inner
@@ -113,11 +98,6 @@ impl TimestampSampler {
 
     pub fn cache_size(&self) -> usize {
         self.inner.cache.len()
-    }
-
-    #[allow(dead_code)]
-    pub fn clear_cache(&self) {
-        self.inner.cache.clear();
     }
 }
 

@@ -3,9 +3,8 @@ use crate::kafka::client::TopicPartition;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields used by test infrastructure via update_with_options
 pub struct LagMetrics {
-    #[allow(dead_code)]
-    pub cluster_name: String,
     pub partition_metrics: Vec<PartitionLagMetric>,
     pub group_metrics: Vec<GroupLagMetric>,
     pub topic_metrics: Vec<TopicLagMetric>,
@@ -187,6 +186,8 @@ impl LagCalculator {
         (partition_metrics, group_metric, topic_metrics)
     }
 
+    /// Calculate lag metrics for the full snapshot. Retained for test compatibility.
+    #[allow(dead_code)]
     pub fn calculate(
         snapshot: &OffsetsSnapshot,
         timestamps: &HashMap<(String, TopicPartition), TimestampData>,
@@ -237,7 +238,6 @@ impl LagCalculator {
             .count() as u64;
 
         LagMetrics {
-            cluster_name: snapshot.cluster_name.clone(),
             partition_metrics,
             group_metrics,
             topic_metrics,
@@ -274,6 +274,7 @@ fn build_member_map(group: &GroupSnapshot) -> HashMap<TopicPartition, MemberRef<
     map
 }
 
+#[allow(dead_code)] // Used by test infrastructure via update_with_options
 impl LagMetrics {
     pub fn iter_partition_metrics(&self) -> impl Iterator<Item = &PartitionLagMetric> {
         self.partition_metrics.iter()
@@ -312,7 +313,6 @@ mod tests {
             cluster_name: "test-cluster".to_string(),
             groups: vec![GroupSnapshot {
                 group_id: "test-group".to_string(),
-                state: "Stable".to_string(),
                 members: vec![MemberSnapshot {
                     member_id: "member-1".to_string(),
                     client_id: "client-1".to_string(),
@@ -325,7 +325,6 @@ mod tests {
                 offsets,
             }],
             watermarks,
-            timestamp_ms: 1000000,
         }
     }
 
@@ -402,12 +401,10 @@ mod tests {
             cluster_name: "test".to_string(),
             groups: vec![GroupSnapshot {
                 group_id: "test-group".to_string(),
-                state: "Stable".to_string(),
                 members: vec![],
                 offsets,
             }],
             watermarks,
-            timestamp_ms: 0,
         };
 
         let metrics = LagCalculator::calculate(&snapshot, &HashMap::new(), 0, 100, &HashSet::new());

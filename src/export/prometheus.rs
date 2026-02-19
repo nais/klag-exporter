@@ -29,13 +29,14 @@ mod tests {
     use crate::collector::lag_calculator::{
         GroupLagMetric, LagMetrics, PartitionLagMetric, PartitionOffsetMetric, TopicLagMetric,
     };
+    use crate::config::Granularity;
+    use std::collections::HashMap;
 
     #[test]
     fn test_prometheus_exporter_render() {
         let registry = Arc::new(MetricsRegistry::new());
 
         let metrics = LagMetrics {
-            cluster_name: "test".to_string(),
             partition_metrics: vec![PartitionLagMetric {
                 cluster_name: "test".to_string(),
                 group_id: "group1".to_string(),
@@ -78,7 +79,7 @@ mod tests {
             data_loss_partition_count: 0,
         };
 
-        registry.update("test", &metrics);
+        registry.update_with_options("test", &metrics, Granularity::Partition, &HashMap::new());
 
         let exporter = PrometheusExporter::new(registry);
         let output = exporter.render_metrics();

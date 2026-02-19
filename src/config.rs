@@ -55,16 +55,21 @@ pub struct PerformanceConfig {
     /// Timeout for individual Kafka API operations (metadata, watermarks, etc.)
     #[serde(with = "humantime_serde", default = "default_kafka_timeout")]
     pub kafka_timeout: Duration,
-    /// Timeout for fetching committed offsets per consumer group (kept for config compatibility)
-    #[allow(dead_code)]
-    #[serde(with = "humantime_serde", default = "default_offset_fetch_timeout")]
-    pub offset_fetch_timeout: Duration,
     /// Maximum number of consumer groups to fetch offsets for in parallel
     #[serde(default = "default_max_concurrent_groups")]
     pub max_concurrent_groups: usize,
     /// Maximum number of partitions to fetch watermarks for in parallel
     #[serde(default = "default_max_concurrent_watermarks")]
     pub max_concurrent_watermarks: usize,
+    /// Maximum number of consumer groups to describe in a single Admin API call
+    #[serde(default = "default_describe_groups_batch_size")]
+    pub describe_groups_batch_size: usize,
+    /// TTL for the compacted topics cache (compacted topic list rarely changes)
+    #[serde(
+        with = "humantime_serde",
+        default = "default_compacted_topics_cache_ttl"
+    )]
+    pub compacted_topics_cache_ttl: Duration,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -162,16 +167,20 @@ const fn default_kafka_timeout() -> Duration {
     Duration::from_secs(30)
 }
 
-const fn default_offset_fetch_timeout() -> Duration {
-    Duration::from_secs(10)
-}
-
 const fn default_max_concurrent_groups() -> usize {
     10
 }
 
 const fn default_max_concurrent_watermarks() -> usize {
     50
+}
+
+const fn default_describe_groups_batch_size() -> usize {
+    500
+}
+
+const fn default_compacted_topics_cache_ttl() -> Duration {
+    Duration::from_secs(300)
 }
 
 fn default_otel_endpoint() -> String {
@@ -248,9 +257,10 @@ impl Default for PerformanceConfig {
     fn default() -> Self {
         Self {
             kafka_timeout: default_kafka_timeout(),
-            offset_fetch_timeout: default_offset_fetch_timeout(),
             max_concurrent_groups: default_max_concurrent_groups(),
             max_concurrent_watermarks: default_max_concurrent_watermarks(),
+            describe_groups_batch_size: default_describe_groups_batch_size(),
+            compacted_topics_cache_ttl: default_compacted_topics_cache_ttl(),
         }
     }
 }
@@ -310,6 +320,11 @@ impl Config {
         if self.exporter.performance.max_concurrent_watermarks == 0 {
             return Err(KlagError::Config(
                 "performance.max_concurrent_watermarks must be at least 1".to_string(),
+            ));
+        }
+        if self.exporter.performance.describe_groups_batch_size == 0 {
+            return Err(KlagError::Config(
+                "performance.describe_groups_batch_size must be at least 1".to_string(),
             ));
         }
 
@@ -567,12 +582,13 @@ bootstrap_servers = "localhost:9092"
             config.exporter.performance.kafka_timeout,
             Duration::from_secs(30)
         );
-        assert_eq!(
-            config.exporter.performance.offset_fetch_timeout,
-            Duration::from_secs(10)
-        );
         assert_eq!(config.exporter.performance.max_concurrent_groups, 10);
         assert_eq!(config.exporter.performance.max_concurrent_watermarks, 50);
+        assert_eq!(config.exporter.performance.describe_groups_batch_size, 500);
+        assert_eq!(
+            config.exporter.performance.compacted_topics_cache_ttl,
+            Duration::from_secs(300)
+        );
     }
 
     #[test]
@@ -583,9 +599,10 @@ poll_interval = "60s"
 
 [exporter.performance]
 kafka_timeout = "15s"
-offset_fetch_timeout = "5s"
 max_concurrent_groups = 20
 max_concurrent_watermarks = 100
+describe_groups_batch_size = 250
+compacted_topics_cache_ttl = "10m"
 
 [[clusters]]
 name = "test"
@@ -600,12 +617,13 @@ bootstrap_servers = "localhost:9092"
             config.exporter.performance.kafka_timeout,
             Duration::from_secs(15)
         );
-        assert_eq!(
-            config.exporter.performance.offset_fetch_timeout,
-            Duration::from_secs(5)
-        );
         assert_eq!(config.exporter.performance.max_concurrent_groups, 20);
         assert_eq!(config.exporter.performance.max_concurrent_watermarks, 100);
+        assert_eq!(config.exporter.performance.describe_groups_batch_size, 250);
+        assert_eq!(
+            config.exporter.performance.compacted_topics_cache_ttl,
+            Duration::from_secs(600)
+        );
     }
 
     #[test]
@@ -652,5 +670,28 @@ bootstrap_servers = "localhost:9092"
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("max_concurrent_watermarks must be at least 1"));
+    }
+
+    #[test]
+    fn test_performance_config_validates_zero_batch_size() {
+        let config_content = r#"
+[exporter]
+poll_interval = "30s"
+
+[exporter.performance]
+describe_groups_batch_size = 0
+
+[[clusters]]
+name = "test"
+bootstrap_servers = "localhost:9092"
+"#;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(config_content.as_bytes()).unwrap();
+
+        let result = Config::load(Some(file.path().to_str().unwrap()));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("describe_groups_batch_size must be at least 1"));
     }
 }
