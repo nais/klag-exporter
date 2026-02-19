@@ -198,9 +198,8 @@ impl KafkaClient {
     ) -> Result<HashMap<TopicPartition, i64>> {
         use rdkafka::bindings::*;
 
-        let group_cstr = CString::new(group_id).map_err(|e| {
-            KlagError::Admin(format!("Invalid group_id contains null byte: {e}"))
-        })?;
+        let group_cstr = CString::new(group_id)
+            .map_err(|e| KlagError::Admin(format!("Invalid group_id contains null byte: {e}")))?;
         let timeout_ms = timeout.as_millis() as i32;
 
         unsafe {
@@ -261,16 +260,14 @@ impl KafkaClient {
 
             // Populate the partition list
             for tp in partitions {
-                let topic_cstr = CString::new(tp.topic.as_str()).map_err(|e| {
-                    KlagError::Admin(format!("Topic name contains null byte: {e}"))
-                })?;
+                let topic_cstr = CString::new(tp.topic.as_str())
+                    .map_err(|e| KlagError::Admin(format!("Topic name contains null byte: {e}")))?;
                 rd_kafka_topic_partition_list_add(c_tpl, topic_cstr.as_ptr(), tp.partition);
                 cleanup._topic_cstrings.push(topic_cstr);
             }
 
             // Create the request object
-            let request =
-                rd_kafka_ListConsumerGroupOffsets_new(group_cstr.as_ptr(), c_tpl);
+            let request = rd_kafka_ListConsumerGroupOffsets_new(group_cstr.as_ptr(), c_tpl);
             if request.is_null() {
                 return Err(KlagError::Admin(
                     "Failed to create ListConsumerGroupOffsets request".into(),
@@ -284,9 +281,7 @@ impl KafkaClient {
                 rd_kafka_admin_op_t::RD_KAFKA_ADMIN_OP_LISTCONSUMERGROUPOFFSETS,
             );
             if options.is_null() {
-                return Err(KlagError::Admin(
-                    "Failed to create AdminOptions".into(),
-                ));
+                return Err(KlagError::Admin("Failed to create AdminOptions".into()));
             }
             cleanup.options = options;
 
@@ -359,8 +354,7 @@ impl KafkaClient {
             }
 
             let mut n_groups: usize = 0;
-            let groups_ptr =
-                rd_kafka_ListConsumerGroupOffsets_result_groups(result, &mut n_groups);
+            let groups_ptr = rd_kafka_ListConsumerGroupOffsets_result_groups(result, &mut n_groups);
 
             let mut offsets = HashMap::new();
 
