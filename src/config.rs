@@ -55,7 +55,8 @@ pub struct PerformanceConfig {
     /// Timeout for individual Kafka API operations (metadata, watermarks, etc.)
     #[serde(with = "humantime_serde", default = "default_kafka_timeout")]
     pub kafka_timeout: Duration,
-    /// Timeout for fetching committed offsets per consumer group
+    /// Timeout for fetching committed offsets per consumer group (kept for config compatibility)
+    #[allow(dead_code)]
     #[serde(with = "humantime_serde", default = "default_offset_fetch_timeout")]
     pub offset_fetch_timeout: Duration,
     /// Maximum number of consumer groups to fetch offsets for in parallel

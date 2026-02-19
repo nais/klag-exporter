@@ -76,6 +76,117 @@ pub struct TimestampData {
 }
 
 impl LagCalculator {
+    /// Calculate lag metrics for a single group against the given watermarks.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn calculate_group(
+        cluster_name: &str,
+        group: &GroupSnapshot,
+        watermarks: &HashMap<TopicPartition, (i64, i64)>,
+        timestamps: &HashMap<(String, TopicPartition), TimestampData>,
+        now_ms: i64,
+        compacted_topics: &HashSet<String>,
+    ) -> (Vec<PartitionLagMetric>, GroupLagMetric, Vec<TopicLagMetric>) {
+        let mut partition_metrics = Vec::new();
+        let mut group_max_lag: i64 = 0;
+        let mut group_max_lag_seconds: Option<f64> = Some(0.0);
+        let mut group_sum_lag: i64 = 0;
+        let mut topic_lags: HashMap<String, i64> = HashMap::new();
+
+        let member_map = build_member_map(group);
+
+        for (tp, committed_offset) in &group.offsets {
+            let (low_watermark, high_watermark) = watermarks
+                .get(tp)
+                .copied()
+                .unwrap_or((0, *committed_offset));
+
+            let lag = (high_watermark - committed_offset).max(0);
+
+            let data_loss_detected = *committed_offset < low_watermark;
+            let messages_lost = (low_watermark - *committed_offset).max(0);
+            let retention_margin = *committed_offset - low_watermark;
+
+            let retention_window = high_watermark - low_watermark;
+            let lag_retention_ratio = if retention_window > 0 {
+                let current_lag = high_watermark - *committed_offset;
+                (current_lag as f64 / retention_window as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            let (member_host, consumer_id, client_id) =
+                member_map
+                    .get(tp)
+                    .map_or((String::new(), String::new(), String::new()), |m| {
+                        (
+                            m.client_host.to_string(),
+                            m.member_id.to_string(),
+                            m.client_id.to_string(),
+                        )
+                    });
+
+            let ts_data = timestamps.get(&(group.group_id.clone(), tp.clone()));
+            let lag_seconds = if lag > 0 {
+                ts_data
+                    .map(|td| ((now_ms - td.timestamp_ms) as f64) / 1000.0)
+                    .map(|s| s.max(0.0))
+                    .or(if data_loss_detected { Some(0.0) } else { None })
+            } else {
+                Some(0.0)
+            };
+            let compaction_detected = compacted_topics.contains(&tp.topic);
+
+            partition_metrics.push(PartitionLagMetric {
+                cluster_name: cluster_name.to_string(),
+                group_id: group.group_id.clone(),
+                topic: tp.topic.clone(),
+                partition: tp.partition,
+                member_host,
+                consumer_id,
+                client_id,
+                committed_offset: *committed_offset,
+                lag,
+                lag_seconds,
+                compaction_detected,
+                data_loss_detected,
+                messages_lost,
+                retention_margin,
+                lag_retention_ratio,
+            });
+
+            group_sum_lag += lag;
+            if lag > group_max_lag {
+                group_max_lag = lag;
+            }
+            if let Some(secs) = lag_seconds {
+                group_max_lag_seconds =
+                    Some(group_max_lag_seconds.map_or(secs, |current| current.max(secs)));
+            }
+
+            *topic_lags.entry(tp.topic.clone()).or_insert(0) += lag;
+        }
+
+        let group_metric = GroupLagMetric {
+            cluster_name: cluster_name.to_string(),
+            group_id: group.group_id.clone(),
+            max_lag: group_max_lag,
+            max_lag_seconds: group_max_lag_seconds,
+            sum_lag: group_sum_lag,
+        };
+
+        let topic_metrics: Vec<TopicLagMetric> = topic_lags
+            .into_iter()
+            .map(|(topic, sum_lag)| TopicLagMetric {
+                cluster_name: cluster_name.to_string(),
+                group_id: group.group_id.clone(),
+                topic,
+                sum_lag,
+            })
+            .collect();
+
+        (partition_metrics, group_metric, topic_metrics)
+    }
+
     pub fn calculate(
         snapshot: &OffsetsSnapshot,
         timestamps: &HashMap<(String, TopicPartition), TimestampData>,
@@ -100,117 +211,19 @@ impl LagCalculator {
             })
             .collect();
 
-        // Process each consumer group
+        // Process each consumer group using the per-group method
         for group in &snapshot.groups {
-            let mut group_max_lag: i64 = 0;
-            let mut group_max_lag_seconds: Option<f64> = Some(0.0); // Always emit, default to 0
-            let mut group_sum_lag: i64 = 0;
-            let mut topic_lags: HashMap<String, i64> = HashMap::new();
-
-            // Build member assignment map for partition -> member lookup
-            let member_map = build_member_map(group);
-
-            for (tp, committed_offset) in &group.offsets {
-                let (low_watermark, high_watermark) =
-                    snapshot.get_watermark(tp).unwrap_or((0, *committed_offset));
-
-                // Calculate lag, clamped to 0 for race conditions
-                let lag = (high_watermark - committed_offset).max(0);
-
-                // Data loss detection: committed offset is before the low watermark
-                let data_loss_detected = *committed_offset < low_watermark;
-                let messages_lost = (low_watermark - *committed_offset).max(0);
-
-                // Prevention metrics
-                let retention_margin = *committed_offset - low_watermark; // negative if data loss
-
-                let retention_window = high_watermark - low_watermark;
-                let lag_retention_ratio = if retention_window > 0 {
-                    let current_lag = high_watermark - *committed_offset;
-                    (current_lag as f64 / retention_window as f64) * 100.0
-                } else {
-                    0.0 // empty partition, no ratio
-                };
-
-                // Look up member info for this partition
-                let (member_host, consumer_id, client_id) =
-                    member_map
-                        .get(tp)
-                        .map_or((String::new(), String::new(), String::new()), |m| {
-                            (
-                                m.client_host.to_string(),
-                                m.member_id.to_string(),
-                                m.client_id.to_string(),
-                            )
-                        });
-
-                // Calculate time lag if timestamp available
-                let ts_data = timestamps.get(&(group.group_id.clone(), tp.clone()));
-                let lag_seconds = if lag > 0 {
-                    ts_data
-                        .map(|td| ((now_ms - td.timestamp_ms) as f64) / 1000.0)
-                        .map(|s| s.max(0.0))
-                        // For data-loss-affected partitions without timestamp, still emit metric
-                        // so it shows up in dashboards with `data_loss_detected` label
-                        .or(if data_loss_detected { Some(0.0) } else { None })
-                } else {
-                    Some(0.0)
-                };
-                // Compaction detected if topic has cleanup.policy=compact
-                let compaction_detected = compacted_topics.contains(&tp.topic);
-
-                partition_metrics.push(PartitionLagMetric {
-                    cluster_name: snapshot.cluster_name.clone(),
-                    group_id: group.group_id.clone(),
-                    topic: tp.topic.clone(),
-                    partition: tp.partition,
-                    member_host,
-                    consumer_id,
-                    client_id,
-                    committed_offset: *committed_offset,
-                    lag,
-                    lag_seconds,
-                    compaction_detected,
-                    data_loss_detected,
-                    messages_lost,
-                    retention_margin,
-                    lag_retention_ratio,
-                });
-
-                // Update aggregates
-                group_sum_lag += lag;
-                if lag > group_max_lag {
-                    group_max_lag = lag;
-                }
-                // Track max time lag separately - use the max of all available time lags.
-                // This ensures max_lag_seconds reflects the worst case we CAN measure,
-                // even if the partition with highest offset lag has no timestamp.
-                if let Some(secs) = lag_seconds {
-                    group_max_lag_seconds =
-                        Some(group_max_lag_seconds.map_or(secs, |current| current.max(secs)));
-                }
-
-                *topic_lags.entry(tp.topic.clone()).or_insert(0) += lag;
-            }
-
-            // Add group-level metrics
-            group_metrics.push(GroupLagMetric {
-                cluster_name: snapshot.cluster_name.clone(),
-                group_id: group.group_id.clone(),
-                max_lag: group_max_lag,
-                max_lag_seconds: group_max_lag_seconds,
-                sum_lag: group_sum_lag,
-            });
-
-            // Add topic-level metrics
-            for (topic, sum_lag) in topic_lags {
-                topic_metrics.push(TopicLagMetric {
-                    cluster_name: snapshot.cluster_name.clone(),
-                    group_id: group.group_id.clone(),
-                    topic,
-                    sum_lag,
-                });
-            }
+            let (p_metrics, g_metric, t_metrics) = Self::calculate_group(
+                &snapshot.cluster_name,
+                group,
+                &snapshot.watermarks,
+                timestamps,
+                now_ms,
+                compacted_topics,
+            );
+            partition_metrics.extend(p_metrics);
+            group_metrics.push(g_metric);
+            topic_metrics.extend(t_metrics);
         }
 
         // Count compaction and data loss detections from partition metrics

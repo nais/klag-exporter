@@ -67,7 +67,7 @@ impl OffsetCollector {
     /// For large clusters, use `collect_parallel` instead.
     #[allow(dead_code)]
     #[instrument(skip(self), fields(cluster = %self.client.cluster_name()))]
-    pub fn collect(&self) -> Result<OffsetsSnapshot> {
+    pub async fn collect(&self) -> Result<OffsetsSnapshot> {
         let start = std::time::Instant::now();
 
         // List all consumer groups
@@ -92,21 +92,19 @@ impl OffsetCollector {
             .iter()
             .map(|g| g.group_id.as_str())
             .collect();
-        let descriptions = self.client.describe_consumer_groups(&group_ids)?;
+        let descriptions = self.client.describe_consumer_groups(&group_ids).await?;
 
         // Fetch watermarks for all topics
-        let watermarks = self.client.fetch_all_watermarks()?;
+        let watermarks = self.client.fetch_all_watermarks_parallel().await?;
         debug!(partitions = watermarks.len(), "Fetched watermarks");
 
         // Build group snapshots
-        let wm_keys: Vec<TopicPartition> = watermarks.keys().cloned().collect();
         let mut groups = Vec::with_capacity(descriptions.len());
         for desc in descriptions {
-            let offsets = self.client.list_consumer_group_offsets(
-                &desc.group_id,
-                &wm_keys,
-                self.performance.offset_fetch_timeout,
-            )?;
+            let offsets = self
+                .client
+                .list_consumer_group_offsets(&desc.group_id)
+                .await?;
 
             // Filter offsets by topic whitelist/blacklist
             let filtered_offsets: HashMap<TopicPartition, i64> = offsets
@@ -151,7 +149,7 @@ impl OffsetCollector {
     }
 
     /// Collect offsets with parallel watermark and group offset fetching.
-    /// This is more efficient for large clusters with many groups and partitions.
+    /// Builds `GroupSnapshot`s directly as each group's offsets arrive — no intermediate `HashMap`.
     #[instrument(skip(self))]
     pub async fn collect_parallel(&self) -> Result<OffsetsSnapshot> {
         let start = std::time::Instant::now();
@@ -173,61 +171,26 @@ impl OffsetCollector {
             "Filtered consumer groups"
         );
 
-        // Get group descriptions (still sequential as this is a metadata call)
+        // Get group descriptions via Admin API
         let group_ids: Vec<&str> = filtered_groups
             .iter()
             .map(|g| g.group_id.as_str())
             .collect();
-        let descriptions = self.client.describe_consumer_groups(&group_ids)?;
+        let descriptions = self.client.describe_consumer_groups(&group_ids).await?;
         debug!(
             descriptions = descriptions.len(),
             "Fetched consumer group's descriptions"
         );
 
-        // Fetch watermarks in parallel
+        // Fetch watermarks in parallel via Admin API
         let watermarks = self.client.fetch_all_watermarks_parallel().await?;
         debug!(
             partitions = watermarks.len(),
             "Fetched watermarks (parallel)"
         );
 
-        // Fetch group offsets in parallel
-        let group_offsets = self
-            .fetch_all_group_offsets_parallel(&descriptions, &watermarks)
-            .await;
-
-        // Build group snapshots
-        let mut groups = Vec::with_capacity(descriptions.len());
-        for desc in descriptions {
-            let offsets = group_offsets
-                .get(&desc.group_id)
-                .cloned()
-                .unwrap_or_default();
-
-            // Filter offsets by topic whitelist/blacklist
-            let filtered_offsets: HashMap<TopicPartition, i64> = offsets
-                .into_iter()
-                .filter(|(tp, _)| self.filters.matches_topic(&tp.topic))
-                .collect();
-
-            let members = desc
-                .members
-                .into_iter()
-                .map(|m| MemberSnapshot {
-                    member_id: m.member_id,
-                    client_id: m.client_id,
-                    client_host: m.client_host,
-                    assignments: m.assignments,
-                })
-                .collect();
-
-            groups.push(GroupSnapshot {
-                group_id: desc.group_id,
-                state: desc.state,
-                members,
-                offsets: filtered_offsets,
-            });
-        }
+        // Fetch group offsets and build GroupSnapshots directly, in parallel
+        let groups = self.fetch_group_snapshots_parallel(&descriptions).await;
 
         // Filter watermarks by topic
         let filtered_watermarks: HashMap<TopicPartition, (i64, i64)> = watermarks
@@ -249,15 +212,13 @@ impl OffsetCollector {
         })
     }
 
-    /// Fetch offsets for all groups in parallel with bounded concurrency.
-    /// Uses the Admin API (`ListConsumerGroupOffsets`) through the shared `AdminClient` — no per-group consumers needed.
-    async fn fetch_all_group_offsets_parallel(
+    /// Fetch offsets for all groups in parallel and build `GroupSnapshot`s directly.
+    /// Each task produces a complete `GroupSnapshot` — no intermediate `HashMap` needed.
+    async fn fetch_group_snapshots_parallel(
         &self,
         descriptions: &[crate::kafka::client::GroupDescription],
-        watermarks: &HashMap<TopicPartition, (i64, i64)>,
-    ) -> HashMap<String, HashMap<TopicPartition, i64>> {
+    ) -> Vec<GroupSnapshot> {
         let max_concurrent = self.performance.max_concurrent_groups;
-        let offset_timeout = self.performance.offset_fetch_timeout;
 
         debug!(
             groups = descriptions.len(),
@@ -267,30 +228,57 @@ impl OffsetCollector {
 
         let semaphore = Arc::new(Semaphore::new(max_concurrent));
         let client = Arc::clone(&self.client);
-        let wm_keys: Vec<TopicPartition> = watermarks.keys().cloned().collect();
+        let filters = self.filters.clone();
 
         let mut handles = Vec::with_capacity(descriptions.len());
 
         for desc in descriptions {
             let group_id = desc.group_id.clone();
+            let state = desc.state.clone();
+            let members: Vec<MemberSnapshot> = desc
+                .members
+                .iter()
+                .map(|m| MemberSnapshot {
+                    member_id: m.member_id.clone(),
+                    client_id: m.client_id.clone(),
+                    client_host: m.client_host.clone(),
+                    assignments: m.assignments.clone(),
+                })
+                .collect();
             let permit = semaphore.clone();
             let client_clone = Arc::clone(&client);
-            let partitions = wm_keys.clone();
-            let timeout = offset_timeout;
+            let filters_clone = filters.clone();
 
             let handle = tokio::spawn(async move {
-                let permit_guard: OwnedSemaphorePermit =
+                let _permit_guard: OwnedSemaphorePermit =
                     permit.acquire_owned().await.expect("semaphore closed");
 
-                tokio::task::spawn_blocking(move || {
-                    let _permit = permit_guard;
+                let offsets = client_clone.list_consumer_group_offsets(&group_id).await;
 
-                    let offsets =
-                        client_clone.list_consumer_group_offsets(&group_id, &partitions, timeout);
+                match offsets {
+                    Ok(offsets) => {
+                        let filtered_offsets: HashMap<TopicPartition, i64> = offsets
+                            .into_iter()
+                            .filter(|(tp, _)| filters_clone.matches_topic(&tp.topic))
+                            .collect();
 
-                    (group_id, offsets)
-                })
-                .await
+                        Some(GroupSnapshot {
+                            group_id,
+                            state,
+                            members,
+                            offsets: filtered_offsets,
+                        })
+                    }
+                    Err(e) => {
+                        warn!(group = group_id, error = %e, "Failed to fetch group offsets");
+                        Some(GroupSnapshot {
+                            group_id,
+                            state,
+                            members,
+                            offsets: HashMap::new(),
+                        })
+                    }
+                }
             });
 
             handles.push(handle);
@@ -298,26 +286,16 @@ impl OffsetCollector {
 
         let results = futures::future::join_all(handles).await;
 
-        let mut all_offsets = HashMap::new();
-        for result in results {
-            match result {
-                Ok(Ok((group_id, Ok(offsets)))) => {
-                    all_offsets.insert(group_id, offsets);
-                }
-                Ok(Ok((group_id, Err(e)))) => {
-                    warn!(group = group_id, error = %e, "Failed to fetch group offsets");
-                    all_offsets.insert(group_id, HashMap::new());
-                }
-                Ok(Err(e)) => {
-                    warn!(error = %e, "Group offset fetch blocking task panicked");
-                }
+        results
+            .into_iter()
+            .filter_map(|r| match r {
+                Ok(snapshot) => snapshot,
                 Err(e) => {
-                    warn!(error = %e, "Group offset fetch task panicked");
+                    warn!(error = %e, "Group snapshot task panicked");
+                    None
                 }
-            }
-        }
-
-        all_offsets
+            })
+            .collect()
     }
 }
 
@@ -327,10 +305,6 @@ impl OffsetsSnapshot {
         self.groups.iter().map(|g| g.group_id.as_str()).collect()
     }
 
-    pub fn get_watermark(&self, tp: &TopicPartition) -> Option<(i64, i64)> {
-        self.watermarks.get(tp).copied()
-    }
-
     #[allow(dead_code)]
     pub fn get_high_watermark(&self, tp: &TopicPartition) -> Option<i64> {
         self.watermarks.get(tp).map(|(_, high)| *high)
@@ -338,10 +312,13 @@ impl OffsetsSnapshot {
 }
 
 fn chrono_timestamp_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before UNIX epoch")
+            .as_millis(),
+    )
+    .expect("timestamp overflow")
 }
 
 #[cfg(test)]

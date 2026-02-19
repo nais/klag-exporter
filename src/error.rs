@@ -36,6 +36,7 @@ pub enum KlagError {
     #[error("Leadership error: {0}")]
     Leadership(String),
 
+    #[allow(dead_code)]
     #[error("Admin API error: {0}")]
     Admin(String),
 }
