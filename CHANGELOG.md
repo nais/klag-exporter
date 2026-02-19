@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.15](https://github.com/softwaremill/klag-exporter/compare/v0.1.14...v0.1.15) - 2026-02-19
+
+### Fixed
+
+- fixing copilot review
+- fix formatting
+
+### Other
+
+- copilot review
+- Consumer Pool for Timestamps
+- klag-exporter/src/kafka/client.rs
+- make base consumer reusable with Arc
+- added testing env for large cluster setup
+
 ## [0.1.14](https://github.com/softwaremill/klag-exporter/compare/v0.1.13...v0.1.14) - 2026-01-30
 
 ### Added
