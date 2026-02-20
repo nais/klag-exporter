@@ -115,16 +115,26 @@ impl KafkaClient {
         group_ids: &[&str],
     ) -> Result<Vec<GroupDescription>> {
         let batch_size = self.performance.describe_groups_batch_size;
+
+        let chunk_futs: Vec<_> = group_ids
+            .chunks(batch_size)
+            .map(|chunk| {
+                let opts = self.admin_options();
+                let ids: Vec<String> = chunk.iter().map(|s| (*s).to_string()).collect();
+                async move {
+                    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+                    self.admin
+                        .describe_consumer_groups(refs.iter(), &opts)
+                        .await
+                        .map_err(KlagError::Kafka)
+                }
+            })
+            .collect();
+
+        let batch_results = futures::future::try_join_all(chunk_futs).await?;
+
         let mut descriptions = Vec::with_capacity(group_ids.len());
-
-        for chunk in group_ids.chunks(batch_size) {
-            let opts = self.admin_options();
-            let results = self
-                .admin
-                .describe_consumer_groups(chunk.iter(), &opts)
-                .await
-                .map_err(KlagError::Kafka)?;
-
+        for results in batch_results {
             for result in results {
                 match result {
                     Ok(desc) => {
