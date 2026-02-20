@@ -239,7 +239,9 @@ impl ClusterManager {
         let start = Instant::now();
 
         // 1. List and filter consumer groups
+        let step = Instant::now();
         let all_groups = self.client.list_consumer_groups()?;
+        let list_ms = step.elapsed().as_millis();
         debug!(total_groups = all_groups.len(), "Listed consumer groups");
 
         let group_ids: Vec<&str> = all_groups
@@ -253,25 +255,33 @@ impl ClusterManager {
         );
 
         // 2. Describe consumer groups
+        let step = Instant::now();
         let descriptions = self.client.describe_consumer_groups(&group_ids).await?;
+        let describe_ms = step.elapsed().as_millis();
         debug!(
             descriptions = descriptions.len(),
             "Described consumer groups"
         );
 
         // 3. Pre-fetch offsets for all groups to discover ALL partitions with committed offsets
+        let step = Instant::now();
         let (all_group_offsets, all_committed_partitions) =
             self.pre_fetch_group_offsets(&descriptions).await;
+        let offsets_ms = step.elapsed().as_millis();
 
         // 4. Fetch watermarks for ALL partitions with committed offsets (targeted, no metadata call)
+        let step = Instant::now();
         let watermarks = self
             .client
             .fetch_watermarks_for_partitions(&all_committed_partitions)
             .await?;
+        let watermarks_ms = step.elapsed().as_millis();
         debug!(partitions = watermarks.len(), "Fetched targeted watermarks");
 
         // 5. Fetch compacted topics (cached with TTL)
+        let step = Instant::now();
         let compacted_topics = self.fetch_compacted_topics_cached().await;
+        let compacted_ms = step.elapsed().as_millis();
 
         // 6. Begin streaming cycle
         self.registry.begin_cycle(&self.cluster_name);
@@ -280,6 +290,7 @@ impl ClusterManager {
         self.push_partition_offset_points(&watermarks);
 
         // 8. Stream groups and push per-group metrics
+        let step = Instant::now();
         let (total_compaction_detected, total_data_loss_partitions, total_skipped_partitions) =
             self.stream_group_metrics(
                 descriptions,
@@ -288,6 +299,19 @@ impl ClusterManager {
                 compacted_topics,
             )
             .await;
+        let stream_ms = step.elapsed().as_millis();
+
+        info!(
+            list_groups_ms = %list_ms,
+            describe_groups_ms = %describe_ms,
+            prefetch_offsets_ms = %offsets_ms,
+            fetch_watermarks_ms = %watermarks_ms,
+            compacted_topics_ms = %compacted_ms,
+            stream_metrics_ms = %stream_ms,
+            groups = group_ids.len(),
+            partitions = all_committed_partitions.len(),
+            "Collection cycle step timings"
+        );
 
         // 9. Emit cluster summary points
         #[allow(clippy::cast_possible_truncation)]
