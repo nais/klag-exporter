@@ -558,7 +558,7 @@ impl ClusterManager {
         match self.client.fetch_compacted_topics().await {
             Ok(topics) => {
                 if !topics.is_empty() {
-                    debug!(compacted_topics = ?topics, "Identified compacted topics");
+                    trace!(compacted_topics = ?topics, "Identified compacted topics");
                 }
                 topics
             }

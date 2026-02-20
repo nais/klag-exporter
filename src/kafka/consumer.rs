@@ -156,7 +156,7 @@ impl TimestampConsumer {
 
         consumer.poll(self.fetch_timeout).map_or_else(
             || {
-                debug!(
+                trace!(
                     topic = tp.topic,
                     partition = tp.partition,
                     offset = offset,

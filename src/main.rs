@@ -208,12 +208,22 @@ async fn create_leadership_provider(
 }
 
 fn init_logging(level: &str) {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
+    use std::io::IsTerminal;
 
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
+    let fmt_layer = tracing_subscriber::fmt::layer();
+
+    if std::io::stdout().is_terminal() {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer)
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer.json())
+            .init();
+    }
 }
 
 async fn shutdown_signal() {

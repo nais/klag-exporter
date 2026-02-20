@@ -714,5 +714,4 @@ bootstrap_servers = "localhost:9092"
             prop_assert!(result.is_ok(), "compacted_topics_cache_ttl={}s should be valid", secs);
         }
     }
-
 }

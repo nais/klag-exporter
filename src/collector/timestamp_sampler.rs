@@ -4,7 +4,7 @@ use crate::kafka::client::TopicPartition;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{debug, instrument};
+use tracing::{instrument, trace};
 
 #[derive(Debug, Clone)]
 struct CachedTimestamp {
@@ -72,10 +72,10 @@ impl TimestampSampler {
             && cached.offset == offset
         {
             if let Some(ts) = cached.timestamp_ms {
-                debug!(cached_timestamp = ts, "Using cached timestamp");
+                trace!(cached_timestamp = ts, "Using cached timestamp");
                 return Ok(Some(TimestampResult { timestamp_ms: ts }));
             }
-            debug!("Using cached negative result (no message at offset)");
+            trace!("Using cached negative result (no message at offset)");
             return Ok(None);
         }
 
@@ -94,10 +94,10 @@ impl TimestampSampler {
                 },
             );
             if let Some(ts) = cached.timestamp_ms {
-                debug!(cached_timestamp = ts, "Using dedup-cached timestamp");
+                trace!(cached_timestamp = ts, "Using dedup-cached timestamp");
                 return Ok(Some(TimestampResult { timestamp_ms: ts }));
             }
-            debug!("Using dedup-cached negative result");
+            trace!("Using dedup-cached negative result");
             return Ok(None);
         }
 

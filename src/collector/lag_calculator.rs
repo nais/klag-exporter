@@ -444,7 +444,12 @@ mod tests {
 
         let (group, wm) = make_group("g1", watermarks, offsets);
         let (metrics, skipped) = LagCalculator::calculate_group(
-            "test", &group, &wm, &HashMap::new(), 0, &HashSet::new(),
+            "test",
+            &group,
+            &wm,
+            &HashMap::new(),
+            0,
+            &HashSet::new(),
         );
 
         assert_eq!(metrics.len(), 1);
@@ -476,7 +481,12 @@ mod tests {
         };
 
         let (metrics, _) = LagCalculator::calculate_group(
-            "test", &group, &watermarks, &HashMap::new(), 0, &HashSet::new(),
+            "test",
+            &group,
+            &watermarks,
+            &HashMap::new(),
+            0,
+            &HashSet::new(),
         );
 
         assert_eq!(metrics.len(), 2);
