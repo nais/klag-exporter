@@ -3,11 +3,11 @@ use crate::export::prometheus::PrometheusExporter;
 use crate::leadership::LeadershipStatus;
 use crate::metrics::registry::MetricsRegistry;
 use axum::{
+    Json, Router,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
-    Json, Router,
 };
 use serde::Serialize;
 use std::net::SocketAddr;

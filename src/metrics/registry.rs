@@ -140,10 +140,7 @@ impl MetricsRegistry {
         let mut by_name: HashMap<&str, Vec<&MetricPoint>> = HashMap::new();
         for guard in &guards {
             for point in guard.value() {
-                by_name
-                    .entry(point.name.as_str())
-                    .or_default()
-                    .push(point);
+                by_name.entry(point.name.as_str()).or_default().push(point);
             }
         }
 
@@ -458,11 +455,7 @@ fn build_topic_aggregated_points<'a>(
     let mut aggregated: HashMap<(String, String, String), TopicAggregation> = HashMap::new();
 
     for m in partition_metrics {
-        let key = (
-            m.cluster_name.clone(),
-            m.group_id.clone(),
-            m.topic.clone(),
-        );
+        let key = (m.cluster_name.clone(), m.group_id.clone(), m.topic.clone());
         let agg = aggregated.entry(key).or_default();
         agg.committed_offset += m.committed_offset;
         agg.lag += m.lag;
@@ -865,7 +858,10 @@ mod tests {
         // Consumer group metrics should NOT have partition-level labels
         for line in output.lines() {
             if line.starts_with("kafka_consumergroup_") {
-                assert!(!line.contains("partition="), "unexpected partition= in: {line}");
+                assert!(
+                    !line.contains("partition="),
+                    "unexpected partition= in: {line}"
+                );
                 assert!(
                     !line.contains("member_host="),
                     "unexpected member_host= in: {line}"
@@ -1068,27 +1064,53 @@ mod tests {
 
         // sum(10+20+30) = 60
         let lag = find_metric_value(&output, "kafka_consumergroup_group_lag{", filter);
-        assert!((lag - 60.0).abs() < f64::EPSILON, "Expected lag=60, got {lag}");
+        assert!(
+            (lag - 60.0).abs() < f64::EPSILON,
+            "Expected lag=60, got {lag}"
+        );
 
         // sum(90+180+270) = 540
         let offset = find_metric_value(&output, "kafka_consumergroup_group_offset{", filter);
-        assert!((offset - 540.0).abs() < f64::EPSILON, "Expected offset=540, got {offset}");
+        assert!(
+            (offset - 540.0).abs() < f64::EPSILON,
+            "Expected offset=540, got {offset}"
+        );
 
         // max(5.0, 3.0, 8.0) = 8.0
         let lag_sec = find_metric_value(&output, "kafka_consumergroup_group_lag_seconds{", filter);
-        assert!((lag_sec - 8.0).abs() < f64::EPSILON, "Expected lag_seconds=8.0, got {lag_sec}");
+        assert!(
+            (lag_sec - 8.0).abs() < f64::EPSILON,
+            "Expected lag_seconds=8.0, got {lag_sec}"
+        );
 
         // sum(0+0+0) = 0
         let lost = find_metric_value(&output, "kafka_consumergroup_group_messages_lost{", filter);
-        assert!(lost.abs() < f64::EPSILON, "Expected messages_lost=0, got {lost}");
+        assert!(
+            lost.abs() < f64::EPSILON,
+            "Expected messages_lost=0, got {lost}"
+        );
 
         // min(90, 180, 270) = 90
-        let margin = find_metric_value(&output, "kafka_consumergroup_group_retention_margin{", filter);
-        assert!((margin - 90.0).abs() < f64::EPSILON, "Expected retention_margin=90, got {margin}");
+        let margin = find_metric_value(
+            &output,
+            "kafka_consumergroup_group_retention_margin{",
+            filter,
+        );
+        assert!(
+            (margin - 90.0).abs() < f64::EPSILON,
+            "Expected retention_margin=90, got {margin}"
+        );
 
         // max(10.0, 10.0, 15.0) = 15.0
-        let ratio = find_metric_value(&output, "kafka_consumergroup_group_lag_retention_ratio{", filter);
-        assert!((ratio - 15.0).abs() < f64::EPSILON, "Expected lag_retention_ratio=15, got {ratio}");
+        let ratio = find_metric_value(
+            &output,
+            "kafka_consumergroup_group_lag_retention_ratio{",
+            filter,
+        );
+        assert!(
+            (ratio - 15.0).abs() < f64::EPSILON,
+            "Expected lag_retention_ratio=15, got {ratio}"
+        );
     }
 
     /// Verify boolean OR aggregation: compaction_detected and data_loss_detected
@@ -1147,7 +1169,10 @@ mod tests {
         // lag_seconds line carries both boolean labels — verify OR propagation
         let lag_sec_line: Vec<&str> = output
             .lines()
-            .filter(|l| l.starts_with("kafka_consumergroup_group_lag_seconds{") && l.contains("group=\"g1\""))
+            .filter(|l| {
+                l.starts_with("kafka_consumergroup_group_lag_seconds{")
+                    && l.contains("group=\"g1\"")
+            })
             .collect();
         assert_eq!(lag_sec_line.len(), 1);
         assert!(
@@ -1162,8 +1187,15 @@ mod tests {
         );
 
         // messages_lost should be summed: 0+3 = 3
-        let lost = find_metric_value(&output, "kafka_consumergroup_group_messages_lost{", "group=\"g1\"");
-        assert!((lost - 3.0).abs() < f64::EPSILON, "Expected messages_lost=3, got {lost}");
+        let lost = find_metric_value(
+            &output,
+            "kafka_consumergroup_group_messages_lost{",
+            "group=\"g1\"",
+        );
+        assert!(
+            (lost - 3.0).abs() < f64::EPSILON,
+            "Expected messages_lost=3, got {lost}"
+        );
     }
 
     #[test]

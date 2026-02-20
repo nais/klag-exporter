@@ -1,6 +1,6 @@
 use crate::error::Result;
-use crate::kafka::client::TopicPartition;
 use crate::kafka::TimestampConsumer;
+use crate::kafka::client::TopicPartition;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -90,9 +90,7 @@ impl TimestampSampler {
     }
 
     pub fn remove_entry(&self, group_id: &str, tp: &TopicPartition) {
-        self.inner
-            .cache
-            .remove(&(group_id.to_string(), tp.clone()));
+        self.inner.cache.remove(&(group_id.to_string(), tp.clone()));
     }
 
     pub fn clear_stale_entries(&self) {
@@ -189,8 +187,10 @@ mod tests {
 
         // Only the fresh entry should remain
         assert_eq!(cache.len(), 1);
-        assert!(cache
-            .get(&("g1".to_string(), TopicPartition::new("t1", 1)))
-            .is_some());
+        assert!(
+            cache
+                .get(&("g1".to_string(), TopicPartition::new("t1", 1)))
+                .is_some()
+        );
     }
 }

@@ -3,18 +3,18 @@ use crate::collector::offset_collector::{GroupSnapshot, MemberSnapshot};
 use crate::collector::timestamp_sampler::TimestampSampler;
 use crate::config::{ClusterConfig, CompiledFilters, ExporterConfig, Granularity};
 use crate::error::Result;
-use crate::kafka::client::{GroupDescription, KafkaClient, TopicPartition};
 use crate::kafka::TimestampConsumer;
+use crate::kafka::client::{GroupDescription, KafkaClient, TopicPartition};
 use crate::leadership::LeadershipStatus;
 use crate::metrics::registry::{
-    build_cluster_summary_points, build_group_metric_points, build_partition_offset_points,
-    MetricsRegistry,
+    MetricsRegistry, build_cluster_summary_points, build_group_metric_points,
+    build_partition_offset_points,
 };
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, error, info, instrument, trace, warn};
 
 /// Default timeout for a single collection cycle (should be less than `poll_interval`)
@@ -280,8 +280,13 @@ impl ClusterManager {
         self.push_partition_offset_points(&watermarks);
 
         // 8. Stream groups and push per-group metrics
-        let (total_compaction_detected, total_data_loss_partitions, total_skipped_partitions) = self
-            .stream_group_metrics(descriptions, all_group_offsets, watermarks, compacted_topics)
+        let (total_compaction_detected, total_data_loss_partitions, total_skipped_partitions) =
+            self.stream_group_metrics(
+                descriptions,
+                all_group_offsets,
+                watermarks,
+                compacted_topics,
+            )
             .await;
 
         // 9. Emit cluster summary points
@@ -312,16 +317,14 @@ impl ClusterManager {
                 .timestamp_sampler
                 .as_ref()
                 .map_or(0, TimestampSampler::cache_size),
-            "Collection cycle completed (streaming)"
+            "Collection cycle completed (streaming), took {} seconds",
+            start.elapsed().as_secs_f32()
         );
 
         Ok(())
     }
 
-    fn push_partition_offset_points(
-        &self,
-        watermarks: &HashMap<TopicPartition, (i64, i64)>,
-    ) {
+    fn push_partition_offset_points(&self, watermarks: &HashMap<TopicPartition, (i64, i64)>) {
         let partition_offsets: Vec<PartitionOffsetMetric> = watermarks
             .iter()
             .map(|(tp, (low, high))| PartitionOffsetMetric {
@@ -403,26 +406,20 @@ impl ClusterManager {
                     };
 
                     let timestamps = if let Some(ref sampler) = timestamp_sampler {
-                        fetch_group_timestamps(
-                            sampler,
-                            &group,
-                            &watermarks,
-                            max_concurrent_fetches,
-                        )
-                        .await
+                        fetch_group_timestamps(sampler, &group, &watermarks, max_concurrent_fetches)
+                            .await
                     } else {
                         HashMap::new()
                     };
 
-                    let (partition_metrics, skipped) =
-                        LagCalculator::calculate_group(
-                            &cluster_name,
-                            &group,
-                            &watermarks,
-                            &timestamps,
-                            now_ms,
-                            &compacted_topics,
-                        );
+                    let (partition_metrics, skipped) = LagCalculator::calculate_group(
+                        &cluster_name,
+                        &group,
+                        &watermarks,
+                        &timestamps,
+                        now_ms,
+                        &compacted_topics,
+                    );
 
                     #[allow(clippy::cast_possible_truncation)]
                     let compaction_count = partition_metrics
@@ -454,7 +451,11 @@ impl ClusterManager {
             total_skipped_partitions += skipped;
         }
 
-        (total_compaction_detected, total_data_loss_partitions, total_skipped_partitions)
+        (
+            total_compaction_detected,
+            total_data_loss_partitions,
+            total_skipped_partitions,
+        )
     }
 
     /// Pre-fetch committed offsets for all groups, returning the offsets per group

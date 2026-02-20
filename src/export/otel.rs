@@ -1,11 +1,11 @@
 use crate::config::OtelConfig;
 use crate::error::Result;
 use crate::metrics::registry::MetricsRegistry;
-use opentelemetry::global;
 use opentelemetry::KeyValue;
+use opentelemetry::global;
 use opentelemetry_otlp::{MetricExporter, WithExportConfig};
-use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;

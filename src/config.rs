@@ -319,7 +319,12 @@ impl Config {
                 "performance.kafka_timeout must be greater than 0".to_string(),
             ));
         }
-        if self.exporter.performance.compacted_topics_cache_ttl.is_zero() {
+        if self
+            .exporter
+            .performance
+            .compacted_topics_cache_ttl
+            .is_zero()
+        {
             return Err(KlagError::Config(
                 "performance.compacted_topics_cache_ttl must be greater than 0".to_string(),
             ));
@@ -451,8 +456,8 @@ bootstrap_servers = "localhost:9092"
             file.write_all(config_content.as_bytes())
                 .expect("write config");
 
-            let config =
-                Config::load(Some(file.path().to_str().expect("path to str"))).expect("load config");
+            let config = Config::load(Some(file.path().to_str().expect("path to str")))
+                .expect("load config");
             assert_eq!(
                 config.clusters[0].consumer_properties.get("sasl.username"),
                 Some(&"myuser".to_string())
@@ -476,8 +481,8 @@ bootstrap_servers = "${TEST_NONEXISTENT_VAR:-localhost:9092}"
             file.write_all(config_content.as_bytes())
                 .expect("write config");
 
-            let config =
-                Config::load(Some(file.path().to_str().expect("path to str"))).expect("load config");
+            let config = Config::load(Some(file.path().to_str().expect("path to str")))
+                .expect("load config");
             // Should use default value since env var is not set
             assert_eq!(config.clusters[0].bootstrap_servers, "localhost:9092");
         });
@@ -499,8 +504,8 @@ bootstrap_servers = "${TEST_BOOTSTRAP:-localhost:9092}"
             file.write_all(config_content.as_bytes())
                 .expect("write config");
 
-            let config =
-                Config::load(Some(file.path().to_str().expect("path to str"))).expect("load config");
+            let config = Config::load(Some(file.path().to_str().expect("path to str")))
+                .expect("load config");
             // Should use env var value instead of default
             assert_eq!(config.clusters[0].bootstrap_servers, "kafka:29092");
         });

@@ -21,7 +21,7 @@ use tokio::sync::broadcast;
 #[cfg(not(feature = "kubernetes"))]
 use tracing::warn;
 use tracing::{error, info};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser, Debug)]
 #[command(name = "klag-exporter")]

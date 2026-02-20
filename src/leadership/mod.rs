@@ -7,8 +7,8 @@
 pub mod kubernetes;
 pub mod noop;
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::watch;
 
 /// Represents the current leadership state.

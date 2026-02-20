@@ -1,10 +1,10 @@
 use crate::config::ClusterConfig;
 use crate::error::{KlagError, Result};
 use crate::kafka::client::TopicPartition;
+use rdkafka::Offset;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
-use rdkafka::Offset;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;

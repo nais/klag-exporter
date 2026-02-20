@@ -1,12 +1,12 @@
 use crate::config::{ClusterConfig, PerformanceConfig};
 use crate::error::{KlagError, Result};
+use rdkafka::TopicPartitionList;
 use rdkafka::admin::{AdminClient, AdminOptions, ListConsumerGroupOffsets, ResourceSpecifier};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::groups::GroupList;
 use rdkafka::metadata::Metadata;
-use rdkafka::TopicPartitionList;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tracing::{debug, instrument, trace, warn};
@@ -189,12 +189,21 @@ impl KafkaClient {
             match result {
                 Ok(consumer_group) => {
                     for elem in consumer_group.topic_partitions.elements() {
-                        if let rdkafka::Offset::Offset(offset) = elem.offset()
+                        let offset_val = elem.offset();
+                        if let rdkafka::Offset::Offset(offset) = offset_val
                             && offset >= 0
                         {
                             offsets.insert(
                                 TopicPartition::new(elem.topic(), elem.partition()),
                                 offset,
+                            );
+                        } else {
+                            trace!(
+                                group = group_id,
+                                topic = elem.topic(),
+                                partition = elem.partition(),
+                                offset = ?offset_val,
+                                "Skipping partition with non-numeric or negative committed offset"
                             );
                         }
                     }
@@ -220,8 +229,11 @@ impl KafkaClient {
             .map_err(KlagError::Kafka)
     }
 
-    /// Fetch watermarks for only the specified partitions using the Admin API.
-    /// Avoids fetching metadata for all topics — only queries the given partition set.
+    /// Fetch watermarks for only the specified partitions.
+    ///
+    /// Primary path: bulk `Admin::list_offsets` (efficient for large partition sets).
+    /// Fallback: per-partition `Consumer::fetch_watermarks` for any partitions where
+    /// `list_offsets` returned an unresolved offset (sentinel value like `Offset::End`).
     #[instrument(skip(self, partitions), fields(cluster = %self.config.name, count = partitions.len()))]
     pub async fn fetch_watermarks_for_partitions(
         &self,
@@ -246,7 +258,6 @@ impl KafkaClient {
         );
 
         let opts = self.admin_options();
-
         let (earliest_results, latest_results) = futures::future::try_join(
             self.admin.list_offsets(&tpl_earliest, &opts),
             self.admin.list_offsets(&tpl_latest, &opts),
@@ -254,20 +265,53 @@ impl KafkaClient {
         .await
         .map_err(KlagError::Kafka)?;
 
-        let mut earliest_map: HashMap<(String, i32), i64> = HashMap::new();
-        for result in earliest_results {
+        let earliest_map = Self::collect_resolved_offsets(earliest_results, "earliest");
+        let mut watermarks = Self::build_watermarks(latest_results, &earliest_map);
+
+        self.fallback_missing_watermarks(partitions, &mut watermarks, total);
+
+        debug!(
+            fetched = watermarks.len(),
+            requested = total,
+            "Targeted watermark fetch completed"
+        );
+
+        Ok(watermarks)
+    }
+
+    /// Extract resolved numeric offsets from `list_offsets` results, logging unresolved variants.
+    fn collect_resolved_offsets(
+        results: Vec<rdkafka::admin::ListOffsetsResult>,
+        label: &str,
+    ) -> HashMap<(String, i32), i64> {
+        let mut map = HashMap::new();
+        for result in results {
             match result {
                 Ok(info) => {
                     if let rdkafka::Offset::Offset(offset) = info.offset {
-                        earliest_map.insert((info.topic, info.partition), offset);
+                        map.insert((info.topic, info.partition), offset);
+                    } else {
+                        warn!(
+                            topic = %info.topic,
+                            partition = info.partition,
+                            offset = ?info.offset,
+                            "list_offsets returned unresolved {label} offset variant"
+                        );
                     }
                 }
                 Err((topic, partition, err)) => {
-                    warn!(topic = %topic, partition = partition, error = %err, "Failed to fetch earliest offset");
+                    warn!(topic = %topic, partition, error = %err, "Failed to fetch {label} offset");
                 }
             }
         }
+        map
+    }
 
+    /// Build (low, high) watermark map from latest-offset results paired with earliest offsets.
+    fn build_watermarks(
+        latest_results: Vec<rdkafka::admin::ListOffsetsResult>,
+        earliest_map: &HashMap<(String, i32), i64>,
+    ) -> HashMap<TopicPartition, (i64, i64)> {
         let mut watermarks = HashMap::new();
         for result in latest_results {
             match result {
@@ -281,21 +325,67 @@ impl KafkaClient {
                             TopicPartition::new(&info.topic, info.partition),
                             (low, high),
                         );
+                    } else {
+                        warn!(
+                            topic = %info.topic,
+                            partition = info.partition,
+                            offset = ?info.offset,
+                            "list_offsets returned unresolved latest offset variant"
+                        );
                     }
                 }
                 Err((topic, partition, err)) => {
-                    warn!(topic = %topic, partition = partition, error = %err, "Failed to fetch latest offset");
+                    warn!(topic = %topic, partition, error = %err, "Failed to fetch latest offset");
                 }
             }
         }
+        watermarks
+    }
 
-        debug!(
-            fetched = watermarks.len(),
-            requested = total,
-            "Targeted watermark fetch completed"
+    /// For any partitions not resolved by `list_offsets`, fall back to
+    /// the proven `Consumer::fetch_watermarks` (`rd_kafka_query_watermark_offsets`).
+    fn fallback_missing_watermarks(
+        &self,
+        partitions: &HashSet<TopicPartition>,
+        watermarks: &mut HashMap<TopicPartition, (i64, i64)>,
+        total: usize,
+    ) {
+        let missing: Vec<_> = partitions
+            .iter()
+            .filter(|tp| !watermarks.contains_key(*tp))
+            .collect();
+
+        if missing.is_empty() {
+            return;
+        }
+
+        warn!(
+            missing = missing.len(),
+            resolved = watermarks.len(),
+            total,
+            "list_offsets did not resolve all partitions, falling back to Consumer::fetch_watermarks"
         );
 
-        Ok(watermarks)
+        tokio::task::block_in_place(|| {
+            for tp in &missing {
+                match self
+                    .consumer
+                    .fetch_watermarks(&tp.topic, tp.partition, self.timeout)
+                {
+                    Ok((low, high)) => {
+                        watermarks.insert((*tp).clone(), (low, high));
+                    }
+                    Err(err) => {
+                        warn!(
+                            topic = %tp.topic,
+                            partition = tp.partition,
+                            error = %err,
+                            "Fallback watermark fetch also failed"
+                        );
+                    }
+                }
+            }
+        });
     }
 
     pub fn admin_options(&self) -> AdminOptions {

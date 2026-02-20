@@ -26,9 +26,7 @@ impl Clone for PrometheusExporter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collector::lag_calculator::{
-        LagMetrics, PartitionLagMetric, PartitionOffsetMetric,
-    };
+    use crate::collector::lag_calculator::{LagMetrics, PartitionLagMetric, PartitionOffsetMetric};
     use crate::config::Granularity;
     use std::collections::HashMap;
 

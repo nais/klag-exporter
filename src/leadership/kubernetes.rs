@@ -9,7 +9,7 @@ use crate::error::{KlagError, Result};
 use kube::Client;
 use kube_lease_manager::{LeaseCreateMode, LeaseManagerBuilder};
 use std::sync::Arc;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 

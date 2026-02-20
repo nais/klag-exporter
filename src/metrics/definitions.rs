@@ -48,7 +48,5 @@ pub const HELP_SKIPPED_PARTITIONS: &str =
     "Number of partitions skipped due to missing watermarks (lag may be understated)";
 pub const HELP_MESSAGES_LOST: &str =
     "Number of messages deleted by retention before consumer processed them";
-pub const HELP_RETENTION_MARGIN: &str =
-    "Offset distance between consumer position and deletion boundary (committed_offset - low_watermark, negative means data loss)";
-pub const HELP_LAG_RETENTION_RATIO: &str =
-    "Percentage of retention window occupied by consumer lag (0=caught up, 100=at boundary, >100=data loss)";
+pub const HELP_RETENTION_MARGIN: &str = "Offset distance between consumer position and deletion boundary (committed_offset - low_watermark, negative means data loss)";
+pub const HELP_LAG_RETENTION_RATIO: &str = "Percentage of retention window occupied by consumer lag (0=caught up, 100=at boundary, >100=data loss)";
