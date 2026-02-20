@@ -42,11 +42,6 @@ values:
     description: Client-side kafka timeout
     config:
       type: string
-  config.exporter.performance.offset_fetch_timeout:
-    displayName: offset_fetch_timeout
-    description: Client-side kafka offset fetch timeout
-    config:
-      type: string
   config.exporter.performance.max_concurrent_groups:
     displayName: max_concurrent_groups
     description: Max concurrent groups processed per fetch
