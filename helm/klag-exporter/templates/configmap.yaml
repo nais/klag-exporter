@@ -19,7 +19,6 @@ data:
     kafka_timeout = {{ .kafka_timeout | quote }}
     offset_fetch_timeout = {{ .offset_fetch_timeout | quote }}
     max_concurrent_groups = {{ .max_concurrent_groups }}
-    max_concurrent_watermarks = {{ .max_concurrent_watermarks }}
     {{- end }}
 
     [exporter.timestamp_sampling]

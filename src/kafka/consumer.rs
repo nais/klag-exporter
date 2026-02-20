@@ -151,7 +151,7 @@ impl TimestampConsumer {
 
         consumer.assign(&tpl).map_err(KlagError::Kafka)?;
 
-        let result = consumer.poll(self.fetch_timeout).map_or_else(
+        consumer.poll(self.fetch_timeout).map_or_else(
             || {
                 debug!(
                     topic = tp.topic,
@@ -186,11 +186,7 @@ impl TimestampConsumer {
                     Err(KlagError::Kafka(e))
                 }
             },
-        );
-
-        // Take consumer out of guard so drop still returns it to pool
-        // (guard.drop() handles the release)
-        result
+        )
     }
 }
 

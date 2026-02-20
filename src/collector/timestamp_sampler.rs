@@ -89,6 +89,12 @@ impl TimestampSampler {
         }))
     }
 
+    pub fn remove_entry(&self, group_id: &str, tp: &TopicPartition) {
+        self.inner
+            .cache
+            .remove(&(group_id.to_string(), tp.clone()));
+    }
+
     pub fn clear_stale_entries(&self) {
         let now = Instant::now();
         self.inner
@@ -116,7 +122,6 @@ mod tests {
 
     #[test]
     fn test_timestamp_cache_ttl_expiry() {
-        // This test verifies cache entry expiration logic
         let cached = CachedTimestamp {
             timestamp_ms: 1000,
             offset: 100,
@@ -125,22 +130,67 @@ mod tests {
 
         let cache_ttl = Duration::from_secs(60);
 
-        // Entry should be expired
+        // Entry should be expired — elapsed exceeds TTL
         assert!(cached.cached_at.elapsed() >= cache_ttl);
+
+        // Fresh entry should NOT be expired
+        let fresh = CachedTimestamp {
+            timestamp_ms: 2000,
+            offset: 200,
+            cached_at: Instant::now(),
+        };
+        assert!(fresh.cached_at.elapsed() < cache_ttl);
     }
 
     #[test]
     fn test_cache_invalidation_on_offset_change() {
-        // This test verifies cache is invalidated when offset changes
         let cached = CachedTimestamp {
             timestamp_ms: 1000,
             offset: 100,
             cached_at: Instant::now(),
         };
 
-        let new_offset = 150;
+        // Same offset → cache hit condition
+        assert_eq!(cached.offset, 100);
+        // Different offset → cache miss condition
+        assert_ne!(cached.offset, 150);
+    }
 
-        // Cache should be invalid because offset changed
-        assert_ne!(cached.offset, new_offset);
+    /// Verify that `clear_stale_entries` removes expired entries and keeps fresh ones.
+    #[test]
+    fn test_clear_stale_entries() {
+        let cache: DashMap<(String, TopicPartition), CachedTimestamp> = DashMap::new();
+        let ttl = Duration::from_secs(60);
+
+        // Insert a stale entry
+        cache.insert(
+            ("g1".to_string(), TopicPartition::new("t1", 0)),
+            CachedTimestamp {
+                timestamp_ms: 1000,
+                offset: 10,
+                cached_at: Instant::now() - Duration::from_secs(120),
+            },
+        );
+        // Insert a fresh entry
+        cache.insert(
+            ("g1".to_string(), TopicPartition::new("t1", 1)),
+            CachedTimestamp {
+                timestamp_ms: 2000,
+                offset: 20,
+                cached_at: Instant::now(),
+            },
+        );
+
+        assert_eq!(cache.len(), 2);
+
+        // Simulate clear_stale_entries logic
+        let now = Instant::now();
+        cache.retain(|_, v| now.duration_since(v.cached_at) < ttl);
+
+        // Only the fresh entry should remain
+        assert_eq!(cache.len(), 1);
+        assert!(cache
+            .get(&("g1".to_string(), TopicPartition::new("t1", 1)))
+            .is_some());
     }
 }

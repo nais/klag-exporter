@@ -27,7 +27,7 @@ impl Clone for PrometheusExporter {
 mod tests {
     use super::*;
     use crate::collector::lag_calculator::{
-        GroupLagMetric, LagMetrics, PartitionLagMetric, PartitionOffsetMetric, TopicLagMetric,
+        LagMetrics, PartitionLagMetric, PartitionOffsetMetric,
     };
     use crate::config::Granularity;
     use std::collections::HashMap;
@@ -54,19 +54,6 @@ mod tests {
                 retention_margin: 100,
                 lag_retention_ratio: 9.09,
             }],
-            group_metrics: vec![GroupLagMetric {
-                cluster_name: "test".to_string(),
-                group_id: "group1".to_string(),
-                max_lag: 10,
-                max_lag_seconds: Some(5.0),
-                sum_lag: 10,
-            }],
-            topic_metrics: vec![TopicLagMetric {
-                cluster_name: "test".to_string(),
-                group_id: "group1".to_string(),
-                topic: "topic1".to_string(),
-                sum_lag: 10,
-            }],
             partition_offsets: vec![PartitionOffsetMetric {
                 cluster_name: "test".to_string(),
                 topic: "topic1".to_string(),
@@ -77,6 +64,7 @@ mod tests {
             poll_time_ms: 100,
             compaction_detected_count: 0,
             data_loss_partition_count: 0,
+            skipped_partition_count: 0,
         };
 
         registry.update_with_options("test", &metrics, Granularity::Partition, &HashMap::new());

@@ -3,7 +3,7 @@ use crate::collector::offset_collector::{GroupSnapshot, MemberSnapshot};
 use crate::collector::timestamp_sampler::TimestampSampler;
 use crate::config::{ClusterConfig, CompiledFilters, ExporterConfig, Granularity};
 use crate::error::Result;
-use crate::kafka::client::{KafkaClient, TopicPartition};
+use crate::kafka::client::{GroupDescription, KafkaClient, TopicPartition};
 use crate::kafka::TimestampConsumer;
 use crate::leadership::LeadershipStatus;
 use crate::metrics::registry::{
@@ -74,15 +74,31 @@ impl ClusterManager {
             "Created cluster manager"
         );
 
-        // Collection timeout should be less than poll_interval to avoid overlap
+        // Collection timeout should be less than poll_interval to avoid overlap,
+        // but must exceed kafka_timeout so individual API calls can finish.
+        let kafka_timeout = performance.kafka_timeout;
         let collection_timeout = if exporter_config.poll_interval > Duration::from_secs(10) {
-            exporter_config
+            let poll_based = exporter_config
                 .poll_interval
                 .checked_sub(Duration::from_secs(5))
-                .expect("should not be negative")
+                .expect("should not be negative");
+            let min_viable = kafka_timeout + Duration::from_secs(5);
+            poll_based.max(min_viable)
         } else {
-            DEFAULT_COLLECTION_TIMEOUT.min(exporter_config.poll_interval)
+            DEFAULT_COLLECTION_TIMEOUT
+                .min(exporter_config.poll_interval)
+                .max(kafka_timeout + Duration::from_secs(5))
         };
+
+        if collection_timeout > exporter_config.poll_interval {
+            warn!(
+                cluster = cluster_name,
+                poll_interval = ?exporter_config.poll_interval,
+                kafka_timeout = ?kafka_timeout,
+                collection_timeout = ?collection_timeout,
+                "collection_timeout exceeds poll_interval; consider increasing poll_interval"
+            );
+        }
 
         Ok(Self {
             cluster_name,
@@ -191,18 +207,18 @@ impl ClusterManager {
                 }
                 _ = cache_cleanup_interval.tick() => {
                     // Periodic cache cleanup (only if leader, to save resources)
-                    if leadership.is_leader() {
-                        if let Some(ref sampler) = self.timestamp_sampler {
-                            let before = sampler.cache_size();
-                            sampler.clear_stale_entries();
-                            let after = sampler.cache_size();
-                            if before != after {
-                                debug!(
-                                    before = before,
-                                    after = after,
-                                    "Cleaned up stale cache entries"
-                                );
-                            }
+                    if leadership.is_leader()
+                        && let Some(ref sampler) = self.timestamp_sampler
+                    {
+                        let before = sampler.cache_size();
+                        sampler.clear_stale_entries();
+                        let after = sampler.cache_size();
+                        if before != after {
+                            debug!(
+                                before = before,
+                                after = after,
+                                "Cleaned up stale cache entries"
+                            );
                         }
                     }
                 }
@@ -218,7 +234,6 @@ impl ClusterManager {
         info!("Collection loop stopped");
     }
 
-    #[allow(clippy::too_many_lines)]
     #[instrument(skip(self))]
     async fn collect_once(&self) -> Result<()> {
         let start = Instant::now();
@@ -244,49 +259,69 @@ impl ClusterManager {
             "Described consumer groups"
         );
 
-        // 3. Collect consumed partitions from member assignments
-        let consumed_partitions: HashSet<TopicPartition> = descriptions
-            .iter()
-            .flat_map(|desc| desc.members.iter())
-            .flat_map(|m| m.assignments.iter())
-            .filter(|tp| self.filters.matches_topic(&tp.topic))
-            .cloned()
-            .collect();
-        debug!(
-            consumed_partitions = consumed_partitions.len(),
-            "Collected consumed partitions"
-        );
+        // 3. Pre-fetch offsets for all groups to discover ALL partitions with committed offsets
+        let (all_group_offsets, all_committed_partitions) =
+            self.pre_fetch_group_offsets(&descriptions).await;
 
-        // 4. Fetch watermarks only for consumed partitions (targeted, no metadata call)
+        // 4. Fetch watermarks for ALL partitions with committed offsets (targeted, no metadata call)
         let watermarks = self
             .client
-            .fetch_watermarks_for_partitions(&consumed_partitions)
+            .fetch_watermarks_for_partitions(&all_committed_partitions)
             .await?;
         debug!(partitions = watermarks.len(), "Fetched targeted watermarks");
 
-        // 4. Fetch compacted topics (cached with TTL)
-        let compacted_topics = {
-            let mut cache = self.compacted_topics_cache.lock().await;
-            if let Some((ref topics, fetched_at)) = *cache {
-                if fetched_at.elapsed() < self.compacted_topics_cache_ttl {
-                    debug!("Using cached compacted topics list");
-                    topics.clone()
-                } else {
-                    let topics = self.fetch_compacted_topics_uncached().await;
-                    *cache = Some((topics.clone(), Instant::now()));
-                    topics
-                }
-            } else {
-                let topics = self.fetch_compacted_topics_uncached().await;
-                *cache = Some((topics.clone(), Instant::now()));
-                topics
-            }
-        };
+        // 5. Fetch compacted topics (cached with TTL)
+        let compacted_topics = self.fetch_compacted_topics_cached().await;
 
-        // 5. Begin streaming cycle
+        // 6. Begin streaming cycle
         self.registry.begin_cycle(&self.cluster_name);
 
-        // 6. Emit partition offset points from watermarks (already filtered to consumed partitions)
+        // 7. Emit partition offset points from watermarks
+        self.push_partition_offset_points(&watermarks);
+
+        // 8. Stream groups and push per-group metrics
+        let (total_compaction_detected, total_data_loss_partitions, total_skipped_partitions) = self
+            .stream_group_metrics(descriptions, all_group_offsets, watermarks, compacted_topics)
+            .await;
+
+        // 9. Emit cluster summary points
+        #[allow(clippy::cast_possible_truncation)]
+        let poll_time_ms = start.elapsed().as_millis() as u64;
+        self.registry.push_points(
+            &self.cluster_name,
+            build_cluster_summary_points(
+                &self.cluster_name,
+                poll_time_ms,
+                total_compaction_detected,
+                total_data_loss_partitions,
+                total_skipped_partitions,
+                &self.cluster_labels,
+            ),
+        );
+
+        // 10. Finish cycle
+        self.registry.finish_cycle(&self.cluster_name);
+
+        #[allow(clippy::cast_possible_truncation)]
+        let scrape_duration_ms = start.elapsed().as_millis() as u64;
+        self.registry.set_scrape_duration_ms(scrape_duration_ms);
+
+        debug!(
+            elapsed_ms = scrape_duration_ms,
+            timestamp_cache_size = self
+                .timestamp_sampler
+                .as_ref()
+                .map_or(0, TimestampSampler::cache_size),
+            "Collection cycle completed (streaming)"
+        );
+
+        Ok(())
+    }
+
+    fn push_partition_offset_points(
+        &self,
+        watermarks: &HashMap<TopicPartition, (i64, i64)>,
+    ) {
         let partition_offsets: Vec<PartitionOffsetMetric> = watermarks
             .iter()
             .map(|(tp, (low, high))| PartitionOffsetMetric {
@@ -302,17 +337,23 @@ impl ClusterManager {
             &self.cluster_name,
             build_partition_offset_points(partition_offsets.iter(), &self.cluster_labels),
         );
-        drop(partition_offsets);
+    }
 
-        // 7. Stream groups: fetch offsets → lag calc → timestamps → push points → free
+    /// Stream through groups concurrently, calculating lag and pushing metrics.
+    /// Returns (`total_compaction_detected`, `total_data_loss_partitions`, `total_skipped_partitions`).
+    async fn stream_group_metrics(
+        &self,
+        descriptions: Vec<GroupDescription>,
+        all_group_offsets: HashMap<String, HashMap<TopicPartition, i64>>,
+        watermarks: HashMap<TopicPartition, (i64, i64)>,
+        compacted_topics: HashSet<String>,
+    ) -> (u64, u64, u64) {
         #[allow(clippy::cast_possible_truncation)]
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock before UNIX epoch")
             .as_millis() as i64;
 
-        let client = Arc::clone(&self.client);
-        let filters = self.filters.clone();
         let cluster_name = self.cluster_name.clone();
         let cluster_labels = self.cluster_labels.clone();
         let granularity = self.granularity;
@@ -320,38 +361,30 @@ impl ClusterManager {
         let watermarks = Arc::new(watermarks);
         let timestamp_sampler = self.timestamp_sampler.clone();
         let max_concurrent_fetches = self.max_concurrent_fetches;
+        let all_group_offsets = Arc::new(all_group_offsets);
 
-        // Accumulate counters across groups
         let mut total_compaction_detected: u64 = 0;
         let mut total_data_loss_partitions: u64 = 0;
+        let mut total_skipped_partitions: u64 = 0;
 
         let mut stream = futures::stream::iter(descriptions)
             .map(|desc| {
-                let client = Arc::clone(&client);
-                let filters = filters.clone();
                 let cluster_name = cluster_name.clone();
                 let cluster_labels = cluster_labels.clone();
                 let compacted_topics = Arc::clone(&compacted_topics);
                 let watermarks = Arc::clone(&watermarks);
                 let timestamp_sampler = timestamp_sampler.clone();
+                let all_group_offsets = Arc::clone(&all_group_offsets);
 
                 async move {
-                    // a. Fetch offsets for this group
-                    let offsets = match client
-                        .list_consumer_group_offsets(&desc.group_id)
-                        .await
-                    {
-                        Ok(offsets) => offsets
-                            .into_iter()
-                            .filter(|(tp, _)| filters.matches_topic(&tp.topic))
-                            .collect(),
-                        Err(e) => {
-                            warn!(group = desc.group_id, error = %e, "Failed to fetch group offsets");
-                            HashMap::new()
-                        }
+                    let Some(offsets) = all_group_offsets.get(&desc.group_id).cloned() else {
+                        warn!(
+                            group = desc.group_id,
+                            "No pre-fetched offsets available, skipping group"
+                        );
+                        return (Vec::new(), 0, 0, 0);
                     };
 
-                    // b. Build GroupSnapshot
                     let members: Vec<MemberSnapshot> = desc
                         .members
                         .into_iter()
@@ -369,7 +402,6 @@ impl ClusterManager {
                         offsets,
                     };
 
-                    // c. Fetch timestamps inline for lagging partitions
                     let timestamps = if let Some(ref sampler) = timestamp_sampler {
                         fetch_group_timestamps(
                             sampler,
@@ -382,8 +414,7 @@ impl ClusterManager {
                         HashMap::new()
                     };
 
-                    // d. Calculate lag for this group
-                    let (partition_metrics, group_metric, topic_metrics) =
+                    let (partition_metrics, skipped) =
                         LagCalculator::calculate_group(
                             &cluster_name,
                             &group,
@@ -393,69 +424,109 @@ impl ClusterManager {
                             &compacted_topics,
                         );
 
-                    // Count compaction/data loss
+                    #[allow(clippy::cast_possible_truncation)]
                     let compaction_count = partition_metrics
                         .iter()
                         .filter(|m| m.compaction_detected)
                         .count() as u64;
+                    #[allow(clippy::cast_possible_truncation)]
                     let data_loss_count = partition_metrics
                         .iter()
                         .filter(|m| m.data_loss_detected)
                         .count() as u64;
 
-                    // e. Build metric points for this group
                     let points = build_group_metric_points(
                         partition_metrics.iter(),
-                        std::iter::once(&group_metric),
-                        topic_metrics.iter(),
                         granularity,
+                        skipped,
                         &cluster_labels,
                     );
 
-                    // Group data (partition_metrics, group, timestamps) freed when this block ends
-                    (points, compaction_count, data_loss_count)
+                    (points, compaction_count, data_loss_count, skipped)
                 }
             })
             .buffer_unordered(self.max_concurrent_groups);
 
-        while let Some((points, compaction_count, data_loss_count)) = stream.next().await {
-            // f. Push points to registry immediately
+        while let Some((points, compaction_count, data_loss_count, skipped)) = stream.next().await {
             self.registry.push_points(&self.cluster_name, points);
             total_compaction_detected += compaction_count;
             total_data_loss_partitions += data_loss_count;
+            total_skipped_partitions += skipped;
         }
 
-        // 8. Emit cluster summary points
-        #[allow(clippy::cast_possible_truncation)]
-        let poll_time_ms = start.elapsed().as_millis() as u64;
-        self.registry.push_points(
-            &self.cluster_name,
-            build_cluster_summary_points(
-                &self.cluster_name,
-                poll_time_ms,
-                total_compaction_detected,
-                total_data_loss_partitions,
-                &self.cluster_labels,
-            ),
-        );
+        (total_compaction_detected, total_data_loss_partitions, total_skipped_partitions)
+    }
 
-        // 9. Finish cycle
-        self.registry.finish_cycle(&self.cluster_name);
+    /// Pre-fetch committed offsets for all groups, returning the offsets per group
+    /// and the union of all committed partitions (for watermark fetching).
+    async fn pre_fetch_group_offsets(
+        &self,
+        descriptions: &[GroupDescription],
+    ) -> (
+        HashMap<String, HashMap<TopicPartition, i64>>,
+        HashSet<TopicPartition>,
+    ) {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(self.max_concurrent_groups));
 
-        #[allow(clippy::cast_possible_truncation)]
-        let scrape_duration_ms = start.elapsed().as_millis() as u64;
-        self.registry.set_scrape_duration_ms(scrape_duration_ms);
+        let handles: Vec<_> = descriptions
+            .iter()
+            .map(|desc| {
+                let client = Arc::clone(&self.client);
+                let sem = Arc::clone(&semaphore);
+                let group_id = desc.group_id.clone();
+                tokio::spawn(async move {
+                    let _permit = sem.acquire().await;
+                    let result = client.list_consumer_group_offsets(&group_id).await;
+                    (group_id, result)
+                })
+            })
+            .collect();
 
+        let mut all_group_offsets: HashMap<String, HashMap<TopicPartition, i64>> = HashMap::new();
+        let mut all_committed_partitions: HashSet<TopicPartition> = HashSet::new();
+
+        for handle in handles {
+            let Ok((group_id, result)) = handle.await else {
+                warn!("Offset fetch task was cancelled");
+                continue;
+            };
+            match result {
+                Ok(offsets) => {
+                    let filtered: HashMap<TopicPartition, i64> = offsets
+                        .into_iter()
+                        .filter(|(tp, _)| self.filters.matches_topic(&tp.topic))
+                        .collect();
+                    for tp in filtered.keys() {
+                        all_committed_partitions.insert(tp.clone());
+                    }
+                    all_group_offsets.insert(group_id, filtered);
+                }
+                Err(e) => {
+                    warn!(group = group_id, error = %e, "Failed to fetch group offsets, skipping group");
+                }
+            }
+        }
         debug!(
-            elapsed_ms = scrape_duration_ms,
-            timestamp_cache_size = self
-                .timestamp_sampler
-                .as_ref()
-                .map_or(0, TimestampSampler::cache_size),
-            "Collection cycle completed (streaming)"
+            committed_partitions = all_committed_partitions.len(),
+            groups_with_offsets = all_group_offsets.len(),
+            "Pre-fetched offsets for all groups"
         );
 
-        Ok(())
+        (all_group_offsets, all_committed_partitions)
+    }
+
+    /// Fetch compacted topics, using a TTL-based cache to avoid repeated metadata lookups.
+    async fn fetch_compacted_topics_cached(&self) -> HashSet<String> {
+        let mut cache = self.compacted_topics_cache.lock().await;
+        if let Some((ref topics, fetched_at)) = *cache
+            && fetched_at.elapsed() < self.compacted_topics_cache_ttl
+        {
+            debug!("Using cached compacted topics list");
+            return topics.clone();
+        }
+        let topics = self.fetch_compacted_topics_uncached().await;
+        *cache = Some((topics.clone(), Instant::now()));
+        topics
     }
 
     async fn fetch_compacted_topics_uncached(&self) -> HashSet<String> {
@@ -486,10 +557,16 @@ async fn fetch_group_timestamps(
         .offsets
         .iter()
         .filter_map(|(tp, committed_offset)| {
-            let high_watermark = watermarks
+            let (low, high) = watermarks
                 .get(tp)
-                .map_or(*committed_offset, |(_, high)| *high);
-            (high_watermark - committed_offset > 0).then(|| (tp.clone(), *committed_offset))
+                .copied()
+                .unwrap_or((*committed_offset, *committed_offset));
+            if *committed_offset < low {
+                // Data loss: message at committed offset no longer exists — evict stale cache
+                sampler.remove_entry(&group.group_id, tp);
+                return None;
+            }
+            (high - committed_offset > 0).then(|| (tp.clone(), *committed_offset))
         })
         .collect();
 

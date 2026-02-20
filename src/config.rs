@@ -58,9 +58,6 @@ pub struct PerformanceConfig {
     /// Maximum number of consumer groups to fetch offsets for in parallel
     #[serde(default = "default_max_concurrent_groups")]
     pub max_concurrent_groups: usize,
-    /// Maximum number of partitions to fetch watermarks for in parallel
-    #[serde(default = "default_max_concurrent_watermarks")]
-    pub max_concurrent_watermarks: usize,
     /// Maximum number of consumer groups to describe in a single Admin API call
     #[serde(default = "default_describe_groups_batch_size")]
     pub describe_groups_batch_size: usize,
@@ -171,10 +168,6 @@ const fn default_max_concurrent_groups() -> usize {
     10
 }
 
-const fn default_max_concurrent_watermarks() -> usize {
-    50
-}
-
 const fn default_describe_groups_batch_size() -> usize {
     500
 }
@@ -258,7 +251,6 @@ impl Default for PerformanceConfig {
         Self {
             kafka_timeout: default_kafka_timeout(),
             max_concurrent_groups: default_max_concurrent_groups(),
-            max_concurrent_watermarks: default_max_concurrent_watermarks(),
             describe_groups_batch_size: default_describe_groups_batch_size(),
             compacted_topics_cache_ttl: default_compacted_topics_cache_ttl(),
         }
@@ -317,14 +309,19 @@ impl Config {
                 "performance.max_concurrent_groups must be at least 1".to_string(),
             ));
         }
-        if self.exporter.performance.max_concurrent_watermarks == 0 {
-            return Err(KlagError::Config(
-                "performance.max_concurrent_watermarks must be at least 1".to_string(),
-            ));
-        }
         if self.exporter.performance.describe_groups_batch_size == 0 {
             return Err(KlagError::Config(
                 "performance.describe_groups_batch_size must be at least 1".to_string(),
+            ));
+        }
+        if self.exporter.performance.kafka_timeout.is_zero() {
+            return Err(KlagError::Config(
+                "performance.kafka_timeout must be greater than 0".to_string(),
+            ));
+        }
+        if self.exporter.performance.compacted_topics_cache_ttl.is_zero() {
+            return Err(KlagError::Config(
+                "performance.compacted_topics_cache_ttl must be greater than 0".to_string(),
             ));
         }
 
@@ -437,9 +434,8 @@ bootstrap_servers = "localhost:9092"
 
     #[test]
     fn test_config_env_override() {
-        std::env::set_var("TEST_KAFKA_USER", "myuser");
-
-        let config_content = r#"
+        temp_env::with_var("TEST_KAFKA_USER", Some("myuser"), || {
+            let config_content = r#"
 [exporter]
 poll_interval = "30s"
 
@@ -451,24 +447,23 @@ bootstrap_servers = "localhost:9092"
 "sasl.username" = "${TEST_KAFKA_USER}"
 "#;
 
-        let mut file = NamedTempFile::new().unwrap();
-        file.write_all(config_content.as_bytes()).unwrap();
+            let mut file = NamedTempFile::new().expect("create temp file");
+            file.write_all(config_content.as_bytes())
+                .expect("write config");
 
-        let config = Config::load(Some(file.path().to_str().unwrap())).unwrap();
-        assert_eq!(
-            config.clusters[0].consumer_properties.get("sasl.username"),
-            Some(&"myuser".to_string())
-        );
-
-        std::env::remove_var("TEST_KAFKA_USER");
+            let config =
+                Config::load(Some(file.path().to_str().expect("path to str"))).expect("load config");
+            assert_eq!(
+                config.clusters[0].consumer_properties.get("sasl.username"),
+                Some(&"myuser".to_string())
+            );
+        });
     }
 
     #[test]
     fn test_config_env_with_default() {
-        // Ensure env var is NOT set
-        std::env::remove_var("TEST_NONEXISTENT_VAR");
-
-        let config_content = r#"
+        temp_env::with_var("TEST_NONEXISTENT_VAR", None::<&str>, || {
+            let config_content = r#"
 [exporter]
 poll_interval = "30s"
 
@@ -477,19 +472,21 @@ name = "test"
 bootstrap_servers = "${TEST_NONEXISTENT_VAR:-localhost:9092}"
 "#;
 
-        let mut file = NamedTempFile::new().unwrap();
-        file.write_all(config_content.as_bytes()).unwrap();
+            let mut file = NamedTempFile::new().expect("create temp file");
+            file.write_all(config_content.as_bytes())
+                .expect("write config");
 
-        let config = Config::load(Some(file.path().to_str().unwrap())).unwrap();
-        // Should use default value since env var is not set
-        assert_eq!(config.clusters[0].bootstrap_servers, "localhost:9092");
+            let config =
+                Config::load(Some(file.path().to_str().expect("path to str"))).expect("load config");
+            // Should use default value since env var is not set
+            assert_eq!(config.clusters[0].bootstrap_servers, "localhost:9092");
+        });
     }
 
     #[test]
     fn test_config_env_override_default() {
-        std::env::set_var("TEST_BOOTSTRAP", "kafka:29092");
-
-        let config_content = r#"
+        temp_env::with_var("TEST_BOOTSTRAP", Some("kafka:29092"), || {
+            let config_content = r#"
 [exporter]
 poll_interval = "30s"
 
@@ -498,14 +495,15 @@ name = "test"
 bootstrap_servers = "${TEST_BOOTSTRAP:-localhost:9092}"
 "#;
 
-        let mut file = NamedTempFile::new().unwrap();
-        file.write_all(config_content.as_bytes()).unwrap();
+            let mut file = NamedTempFile::new().expect("create temp file");
+            file.write_all(config_content.as_bytes())
+                .expect("write config");
 
-        let config = Config::load(Some(file.path().to_str().unwrap())).unwrap();
-        // Should use env var value instead of default
-        assert_eq!(config.clusters[0].bootstrap_servers, "kafka:29092");
-
-        std::env::remove_var("TEST_BOOTSTRAP");
+            let config =
+                Config::load(Some(file.path().to_str().expect("path to str"))).expect("load config");
+            // Should use env var value instead of default
+            assert_eq!(config.clusters[0].bootstrap_servers, "kafka:29092");
+        });
     }
 
     #[test]
@@ -583,7 +581,6 @@ bootstrap_servers = "localhost:9092"
             Duration::from_secs(30)
         );
         assert_eq!(config.exporter.performance.max_concurrent_groups, 10);
-        assert_eq!(config.exporter.performance.max_concurrent_watermarks, 50);
         assert_eq!(config.exporter.performance.describe_groups_batch_size, 500);
         assert_eq!(
             config.exporter.performance.compacted_topics_cache_ttl,
@@ -600,7 +597,6 @@ poll_interval = "60s"
 [exporter.performance]
 kafka_timeout = "15s"
 max_concurrent_groups = 20
-max_concurrent_watermarks = 100
 describe_groups_batch_size = 250
 compacted_topics_cache_ttl = "10m"
 
@@ -618,7 +614,6 @@ bootstrap_servers = "localhost:9092"
             Duration::from_secs(15)
         );
         assert_eq!(config.exporter.performance.max_concurrent_groups, 20);
-        assert_eq!(config.exporter.performance.max_concurrent_watermarks, 100);
         assert_eq!(config.exporter.performance.describe_groups_batch_size, 250);
         assert_eq!(
             config.exporter.performance.compacted_topics_cache_ttl,
@@ -650,29 +645,6 @@ bootstrap_servers = "localhost:9092"
     }
 
     #[test]
-    fn test_performance_config_validates_zero_watermarks_concurrency() {
-        let config_content = r#"
-[exporter]
-poll_interval = "30s"
-
-[exporter.performance]
-max_concurrent_watermarks = 0
-
-[[clusters]]
-name = "test"
-bootstrap_servers = "localhost:9092"
-"#;
-
-        let mut file = NamedTempFile::new().unwrap();
-        file.write_all(config_content.as_bytes()).unwrap();
-
-        let result = Config::load(Some(file.path().to_str().unwrap()));
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("max_concurrent_watermarks must be at least 1"));
-    }
-
-    #[test]
     fn test_performance_config_validates_zero_batch_size() {
         let config_content = r#"
 [exporter]
@@ -693,5 +665,51 @@ bootstrap_servers = "localhost:9092"
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("describe_groups_batch_size must be at least 1"));
+    }
+
+    #[test]
+    fn test_performance_config_validates_zero_kafka_timeout() {
+        let config_content = r#"
+[exporter]
+poll_interval = "30s"
+
+[exporter.performance]
+kafka_timeout = "0s"
+
+[[clusters]]
+name = "test"
+bootstrap_servers = "localhost:9092"
+"#;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(config_content.as_bytes()).unwrap();
+
+        let result = Config::load(Some(file.path().to_str().unwrap()));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("kafka_timeout must be greater than 0"));
+    }
+
+    #[test]
+    fn test_performance_config_validates_zero_cache_ttl() {
+        let config_content = r#"
+[exporter]
+poll_interval = "30s"
+
+[exporter.performance]
+compacted_topics_cache_ttl = "0s"
+
+[[clusters]]
+name = "test"
+bootstrap_servers = "localhost:9092"
+"#;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(config_content.as_bytes()).unwrap();
+
+        let result = Config::load(Some(file.path().to_str().unwrap()));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("compacted_topics_cache_ttl must be greater than 0"));
     }
 }

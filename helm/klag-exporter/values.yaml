@@ -155,7 +155,6 @@ config:
       kafka_timeout: "45s"
       offset_fetch_timeout: "30s"
       max_concurrent_groups: 20
-      max_concurrent_watermarks: 75
   clusters:
     - name: "cluster-1"
       bootstrap_servers: "kafka:9092"

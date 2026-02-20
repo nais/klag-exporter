@@ -1,21 +1,17 @@
-use crate::collector::lag_calculator::{
-    GroupLagMetric, LagMetrics, PartitionLagMetric, PartitionOffsetMetric, TopicLagMetric,
-};
+use crate::collector::lag_calculator::{LagMetrics, PartitionLagMetric, PartitionOffsetMetric};
 use crate::config::Granularity;
 use crate::metrics::definitions::{
     HELP_COMPACTION_DETECTED, HELP_DATA_LOSS_PARTITIONS, HELP_GROUP_LAG, HELP_GROUP_LAG_SECONDS,
-    HELP_GROUP_MAX_LAG, HELP_GROUP_MAX_LAG_SECONDS, HELP_GROUP_OFFSET, HELP_GROUP_SUM_LAG,
-    HELP_GROUP_TOPIC_SUM_LAG, HELP_LAG_RETENTION_RATIO, HELP_LAST_UPDATE_TIMESTAMP,
-    HELP_MESSAGES_LOST, HELP_PARTITION_EARLIEST_OFFSET, HELP_PARTITION_LATEST_OFFSET,
-    HELP_POLL_TIME_MS, HELP_RETENTION_MARGIN, HELP_SCRAPE_DURATION_SECONDS, HELP_UP,
+    HELP_GROUP_OFFSET, HELP_LAG_RETENTION_RATIO, HELP_LAST_UPDATE_TIMESTAMP, HELP_MESSAGES_LOST,
+    HELP_PARTITION_EARLIEST_OFFSET, HELP_PARTITION_LATEST_OFFSET, HELP_POLL_TIME_MS,
+    HELP_RETENTION_MARGIN, HELP_SCRAPE_DURATION_SECONDS, HELP_SKIPPED_PARTITIONS, HELP_UP,
     LABEL_CLIENT_ID, LABEL_CLUSTER_NAME, LABEL_COMPACTION_DETECTED, LABEL_CONSUMER_ID,
     LABEL_DATA_LOSS_DETECTED, LABEL_GROUP, LABEL_MEMBER_HOST, LABEL_PARTITION, LABEL_TOPIC,
     METRIC_COMPACTION_DETECTED, METRIC_DATA_LOSS_PARTITIONS, METRIC_GROUP_LAG,
-    METRIC_GROUP_LAG_SECONDS, METRIC_GROUP_MAX_LAG, METRIC_GROUP_MAX_LAG_SECONDS,
-    METRIC_GROUP_OFFSET, METRIC_GROUP_SUM_LAG, METRIC_GROUP_TOPIC_SUM_LAG,
-    METRIC_LAG_RETENTION_RATIO, METRIC_LAST_UPDATE_TIMESTAMP, METRIC_MESSAGES_LOST,
-    METRIC_PARTITION_EARLIEST_OFFSET, METRIC_PARTITION_LATEST_OFFSET, METRIC_POLL_TIME_MS,
-    METRIC_RETENTION_MARGIN, METRIC_SCRAPE_DURATION_SECONDS, METRIC_UP,
+    METRIC_GROUP_LAG_SECONDS, METRIC_GROUP_OFFSET, METRIC_LAG_RETENTION_RATIO,
+    METRIC_LAST_UPDATE_TIMESTAMP, METRIC_MESSAGES_LOST, METRIC_PARTITION_EARLIEST_OFFSET,
+    METRIC_PARTITION_LATEST_OFFSET, METRIC_POLL_TIME_MS, METRIC_RETENTION_MARGIN,
+    METRIC_SCRAPE_DURATION_SECONDS, METRIC_SKIPPED_PARTITIONS, METRIC_UP,
 };
 use crate::metrics::types::{Labels, MetricPoint, OtelDataPoint, OtelMetric};
 use dashmap::DashMap;
@@ -69,9 +65,8 @@ impl MetricsRegistry {
 
         points.extend(build_group_metric_points(
             lag_metrics.iter_partition_metrics(),
-            lag_metrics.iter_group_metrics(),
-            lag_metrics.iter_topic_metrics(),
             granularity,
+            lag_metrics.skipped_partition_count,
             custom_labels,
         ));
 
@@ -80,6 +75,7 @@ impl MetricsRegistry {
             lag_metrics.poll_time_ms,
             lag_metrics.compaction_detected_count,
             lag_metrics.data_loss_partition_count,
+            lag_metrics.skipped_partition_count,
             custom_labels,
         ));
 
@@ -124,46 +120,48 @@ impl MetricsRegistry {
         let mut seen_metrics: HashSet<String> = HashSet::new();
         let now = Instant::now();
 
-        // Collect all points, optionally filtering out stale clusters
-        let all_points: Vec<MetricPoint> = self
+        // Collect DashMap guards to keep them alive while we borrow their contents
+        let guards: Vec<_> = self
             .metrics
             .iter()
             .filter(|entry| {
                 if !filter_stale {
                     return true;
                 }
-                // Check if this cluster's data is fresh
                 self.last_update
-                    .get(entry.key()) // No timestamp means stale
+                    .get(entry.key())
                     .is_some_and(|last_update| {
                         now.duration_since(*last_update) <= self.staleness_threshold
                     })
             })
-            .flat_map(|entry| entry.value().clone())
             .collect();
 
-        // Group metrics by name for proper HELP/TYPE output
-        let mut by_name: HashMap<String, Vec<MetricPoint>> = HashMap::new();
-        for point in all_points {
-            by_name.entry(point.name.clone()).or_default().push(point);
+        // Group points by metric name, borrowing from the guards (no cloning)
+        let mut by_name: HashMap<&str, Vec<&MetricPoint>> = HashMap::new();
+        for guard in &guards {
+            for point in guard.value() {
+                by_name
+                    .entry(point.name.as_str())
+                    .or_default()
+                    .push(point);
+            }
         }
 
         // Sort metric names for consistent output
-        let mut names: Vec<_> = by_name.keys().cloned().collect();
-        names.sort();
+        let mut names: Vec<_> = by_name.keys().copied().collect();
+        names.sort_unstable();
 
         for name in names {
-            let points = &by_name[&name];
+            let points = &by_name[name];
             if points.is_empty() {
                 continue;
             }
 
             // Output HELP and TYPE once per metric
-            if !seen_metrics.contains(&name) {
-                let first = &points[0];
+            if seen_metrics.insert(name.to_string()) {
+                let first = points[0];
                 output.push_str(format!("# HELP {name} {}\n", first.help).as_str());
                 output.push_str(format!("# TYPE {name} {}\n", first.metric_type.as_str()).as_str());
-                seen_metrics.insert(name.clone());
             }
 
             // Output all data points
@@ -201,12 +199,11 @@ impl MetricsRegistry {
                 let cluster = entry.key();
                 let timestamp = entry.value();
                 // Only include non-stale clusters if filtering is enabled
-                if filter_stale {
-                    if let Some(last_update) = self.last_update.get(cluster) {
-                        if now.duration_since(*last_update) > self.staleness_threshold {
-                            continue;
-                        }
-                    }
+                if filter_stale
+                    && let Some(last_update) = self.last_update.get(cluster)
+                    && now.duration_since(*last_update) > self.staleness_threshold
+                {
+                    continue;
                 }
                 output.push_str(format!(
                     "{METRIC_LAST_UPDATE_TIMESTAMP}{{{LABEL_CLUSTER_NAME}=\"{cluster}\"}} {timestamp}\n",
@@ -219,8 +216,20 @@ impl MetricsRegistry {
 
     pub fn get_otel_metrics(&self) -> Vec<OtelMetric> {
         let mut otel_metrics: HashMap<String, OtelMetric> = HashMap::new();
+        let now = Instant::now();
 
         for entry in &self.metrics {
+            // Skip stale clusters (same logic as render_prometheus)
+            let is_fresh = self
+                .last_update
+                .get(entry.key())
+                .is_some_and(|last_update| {
+                    now.duration_since(*last_update) <= self.staleness_threshold
+                });
+            if !is_fresh {
+                continue;
+            }
+
             for point in entry.value() {
                 let metric = otel_metrics
                     .entry(point.name.clone())
@@ -365,140 +374,271 @@ pub fn build_partition_offset_points<'a>(
 }
 
 /// Build metric points for a single consumer group's lag data.
-#[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
+/// Granularity controls which labels are included:
+/// - `Partition`: full labels (`partition`, `member_host`, `consumer_id`, `client_id`)
+/// - `Topic`: only `cluster_name`, group, topic (partition metrics are pre-aggregated per topic)
+#[allow(clippy::cast_precision_loss)]
 pub fn build_group_metric_points<'a>(
     partition_metrics: impl Iterator<Item = &'a PartitionLagMetric>,
-    group_metrics: impl Iterator<Item = &'a GroupLagMetric>,
-    topic_metrics: impl Iterator<Item = &'a TopicLagMetric>,
     granularity: Granularity,
+    skipped_partitions: u64,
     custom_labels: &HashMap<String, String>,
 ) -> Vec<MetricPoint> {
     let mut points = Vec::new();
 
-    match granularity {
-        Granularity::Partition => {
-            for m in partition_metrics {
-                let mut labels = Labels::new();
-                labels.insert(LABEL_CLUSTER_NAME.to_string(), m.cluster_name.clone());
-                labels.insert(LABEL_GROUP.to_string(), m.group_id.clone());
-                labels.insert(LABEL_TOPIC.to_string(), m.topic.clone());
-                labels.insert(LABEL_PARTITION.to_string(), m.partition.to_string());
-                labels.insert(LABEL_MEMBER_HOST.to_string(), m.member_host.clone());
-                labels.insert(LABEL_CONSUMER_ID.to_string(), m.consumer_id.clone());
-                labels.insert(LABEL_CLIENT_ID.to_string(), m.client_id.clone());
-                add_custom_labels(&mut labels, custom_labels);
+    build_partition_level_points(partition_metrics, granularity, custom_labels, &mut points);
 
-                points.push(MetricPoint::gauge(
-                    METRIC_GROUP_OFFSET,
-                    labels.clone(),
-                    m.committed_offset as f64,
-                    HELP_GROUP_OFFSET,
-                ));
-
-                points.push(MetricPoint::gauge(
-                    METRIC_GROUP_LAG,
-                    labels.clone(),
-                    m.lag as f64,
-                    HELP_GROUP_LAG,
-                ));
-
-                if let Some(lag_seconds) = m.lag_seconds {
-                    labels.insert(
-                        LABEL_COMPACTION_DETECTED.to_string(),
-                        m.compaction_detected.to_string(),
-                    );
-                    labels.insert(
-                        LABEL_DATA_LOSS_DETECTED.to_string(),
-                        m.data_loss_detected.to_string(),
-                    );
-                    points.push(MetricPoint::gauge(
-                        METRIC_GROUP_LAG_SECONDS,
-                        labels.clone(),
-                        lag_seconds,
-                        HELP_GROUP_LAG_SECONDS,
-                    ));
-                }
-
-                let mut data_loss_labels = Labels::new();
-                data_loss_labels.insert(LABEL_CLUSTER_NAME.to_string(), m.cluster_name.clone());
-                data_loss_labels.insert(LABEL_GROUP.to_string(), m.group_id.clone());
-                data_loss_labels.insert(LABEL_TOPIC.to_string(), m.topic.clone());
-                data_loss_labels.insert(LABEL_PARTITION.to_string(), m.partition.to_string());
-                add_custom_labels(&mut data_loss_labels, custom_labels);
-
-                points.push(MetricPoint::gauge(
-                    METRIC_MESSAGES_LOST,
-                    data_loss_labels.clone(),
-                    m.messages_lost as f64,
-                    HELP_MESSAGES_LOST,
-                ));
-
-                points.push(MetricPoint::gauge(
-                    METRIC_RETENTION_MARGIN,
-                    data_loss_labels.clone(),
-                    m.retention_margin as f64,
-                    HELP_RETENTION_MARGIN,
-                ));
-
-                points.push(MetricPoint::gauge(
-                    METRIC_LAG_RETENTION_RATIO,
-                    data_loss_labels,
-                    m.lag_retention_ratio,
-                    HELP_LAG_RETENTION_RATIO,
-                ));
-            }
-        }
-        Granularity::Topic => {
-            // Skip partition-level metrics, only output topic aggregates
-        }
-    }
-
-    for m in group_metrics {
+    // Emit skipped_partitions per-group (only when > 0)
+    if skipped_partitions > 0
+        && let Some(first) = points.first()
+    {
         let mut labels = Labels::new();
-        labels.insert(LABEL_CLUSTER_NAME.to_string(), m.cluster_name.clone());
-        labels.insert(LABEL_GROUP.to_string(), m.group_id.clone());
-        add_custom_labels(&mut labels, custom_labels);
-
-        points.push(MetricPoint::gauge(
-            METRIC_GROUP_MAX_LAG,
-            labels.clone(),
-            m.max_lag as f64,
-            HELP_GROUP_MAX_LAG,
-        ));
-
-        points.push(MetricPoint::gauge(
-            METRIC_GROUP_SUM_LAG,
-            labels.clone(),
-            m.sum_lag as f64,
-            HELP_GROUP_SUM_LAG,
-        ));
-
-        if let Some(max_lag_seconds) = m.max_lag_seconds {
-            points.push(MetricPoint::gauge(
-                METRIC_GROUP_MAX_LAG_SECONDS,
-                labels,
-                max_lag_seconds,
-                HELP_GROUP_MAX_LAG_SECONDS,
-            ));
+        if let Some(cluster) = first.labels.get(LABEL_CLUSTER_NAME) {
+            labels.insert(LABEL_CLUSTER_NAME.to_string(), cluster.clone());
         }
-    }
-
-    for m in topic_metrics {
-        let mut labels = Labels::new();
-        labels.insert(LABEL_CLUSTER_NAME.to_string(), m.cluster_name.clone());
-        labels.insert(LABEL_GROUP.to_string(), m.group_id.clone());
-        labels.insert(LABEL_TOPIC.to_string(), m.topic.clone());
+        if let Some(group) = first.labels.get(LABEL_GROUP) {
+            labels.insert(LABEL_GROUP.to_string(), group.clone());
+        }
         add_custom_labels(&mut labels, custom_labels);
-
         points.push(MetricPoint::gauge(
-            METRIC_GROUP_TOPIC_SUM_LAG,
+            METRIC_SKIPPED_PARTITIONS,
             labels,
-            m.sum_lag as f64,
-            HELP_GROUP_TOPIC_SUM_LAG,
+            skipped_partitions as f64,
+            HELP_SKIPPED_PARTITIONS,
         ));
     }
 
     points
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn build_partition_level_points<'a>(
+    partition_metrics: impl Iterator<Item = &'a PartitionLagMetric>,
+    granularity: Granularity,
+    custom_labels: &HashMap<String, String>,
+    points: &mut Vec<MetricPoint>,
+) {
+    if granularity == Granularity::Topic {
+        build_topic_aggregated_points(partition_metrics, custom_labels, points);
+    } else {
+        build_per_partition_points(partition_metrics, custom_labels, points);
+    }
+}
+
+/// Emit one set of metric points per partition (full label set).
+#[allow(clippy::cast_precision_loss)]
+fn build_per_partition_points<'a>(
+    partition_metrics: impl Iterator<Item = &'a PartitionLagMetric>,
+    custom_labels: &HashMap<String, String>,
+    points: &mut Vec<MetricPoint>,
+) {
+    for m in partition_metrics {
+        let mut labels = Labels::new();
+        labels.insert(LABEL_CLUSTER_NAME.to_string(), m.cluster_name.clone());
+        labels.insert(LABEL_GROUP.to_string(), m.group_id.clone());
+        labels.insert(LABEL_TOPIC.to_string(), m.topic.clone());
+        labels.insert(LABEL_PARTITION.to_string(), m.partition.to_string());
+        labels.insert(LABEL_MEMBER_HOST.to_string(), m.member_host.clone());
+        labels.insert(LABEL_CONSUMER_ID.to_string(), m.consumer_id.clone());
+        labels.insert(LABEL_CLIENT_ID.to_string(), m.client_id.clone());
+        add_custom_labels(&mut labels, custom_labels);
+
+        emit_partition_metrics(m, &labels, custom_labels, points);
+    }
+}
+
+/// Pre-aggregate partitions per `(cluster, group, topic)`, then emit one point per topic.
+#[allow(clippy::cast_precision_loss)]
+fn build_topic_aggregated_points<'a>(
+    partition_metrics: impl Iterator<Item = &'a PartitionLagMetric>,
+    custom_labels: &HashMap<String, String>,
+    points: &mut Vec<MetricPoint>,
+) {
+    // Aggregate key: (cluster_name, group_id, topic)
+    let mut aggregated: HashMap<(String, String, String), TopicAggregation> = HashMap::new();
+
+    for m in partition_metrics {
+        let key = (
+            m.cluster_name.clone(),
+            m.group_id.clone(),
+            m.topic.clone(),
+        );
+        let agg = aggregated.entry(key).or_default();
+        agg.committed_offset += m.committed_offset;
+        agg.lag += m.lag;
+        agg.lag_seconds = match (agg.lag_seconds, m.lag_seconds) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        };
+        agg.compaction_detected |= m.compaction_detected;
+        agg.data_loss_detected |= m.data_loss_detected;
+        agg.messages_lost += m.messages_lost;
+        agg.retention_margin = agg.retention_margin.min(m.retention_margin);
+        agg.lag_retention_ratio = agg.lag_retention_ratio.max(m.lag_retention_ratio);
+    }
+
+    for ((cluster, group, topic), agg) in &aggregated {
+        let mut labels = Labels::new();
+        labels.insert(LABEL_CLUSTER_NAME.to_string(), cluster.clone());
+        labels.insert(LABEL_GROUP.to_string(), group.clone());
+        labels.insert(LABEL_TOPIC.to_string(), topic.clone());
+        add_custom_labels(&mut labels, custom_labels);
+
+        points.push(MetricPoint::gauge(
+            METRIC_GROUP_OFFSET,
+            labels.clone(),
+            agg.committed_offset as f64,
+            HELP_GROUP_OFFSET,
+        ));
+
+        points.push(MetricPoint::gauge(
+            METRIC_GROUP_LAG,
+            labels.clone(),
+            agg.lag as f64,
+            HELP_GROUP_LAG,
+        ));
+
+        if let Some(lag_seconds) = agg.lag_seconds {
+            labels.insert(
+                LABEL_COMPACTION_DETECTED.to_string(),
+                agg.compaction_detected.to_string(),
+            );
+            labels.insert(
+                LABEL_DATA_LOSS_DETECTED.to_string(),
+                agg.data_loss_detected.to_string(),
+            );
+            points.push(MetricPoint::gauge(
+                METRIC_GROUP_LAG_SECONDS,
+                labels.clone(),
+                lag_seconds,
+                HELP_GROUP_LAG_SECONDS,
+            ));
+        }
+
+        let mut data_loss_labels = Labels::new();
+        data_loss_labels.insert(LABEL_CLUSTER_NAME.to_string(), cluster.clone());
+        data_loss_labels.insert(LABEL_GROUP.to_string(), group.clone());
+        data_loss_labels.insert(LABEL_TOPIC.to_string(), topic.clone());
+        add_custom_labels(&mut data_loss_labels, custom_labels);
+
+        points.push(MetricPoint::gauge(
+            METRIC_MESSAGES_LOST,
+            data_loss_labels.clone(),
+            agg.messages_lost as f64,
+            HELP_MESSAGES_LOST,
+        ));
+
+        points.push(MetricPoint::gauge(
+            METRIC_RETENTION_MARGIN,
+            data_loss_labels.clone(),
+            agg.retention_margin as f64,
+            HELP_RETENTION_MARGIN,
+        ));
+
+        points.push(MetricPoint::gauge(
+            METRIC_LAG_RETENTION_RATIO,
+            data_loss_labels,
+            agg.lag_retention_ratio,
+            HELP_LAG_RETENTION_RATIO,
+        ));
+    }
+}
+
+/// Local aggregation state for Topic granularity — not exported.
+struct TopicAggregation {
+    committed_offset: i64,
+    lag: i64,
+    lag_seconds: Option<f64>,
+    compaction_detected: bool,
+    data_loss_detected: bool,
+    messages_lost: i64,
+    retention_margin: i64,
+    lag_retention_ratio: f64,
+}
+
+impl Default for TopicAggregation {
+    fn default() -> Self {
+        Self {
+            committed_offset: 0,
+            lag: 0,
+            lag_seconds: None,
+            compaction_detected: false,
+            data_loss_detected: false,
+            messages_lost: 0,
+            retention_margin: i64::MAX,
+            lag_retention_ratio: 0.0,
+        }
+    }
+}
+
+/// Shared helper: emit metric points for a single partition's data.
+#[allow(clippy::cast_precision_loss)]
+fn emit_partition_metrics(
+    m: &PartitionLagMetric,
+    labels: &Labels,
+    custom_labels: &HashMap<String, String>,
+    points: &mut Vec<MetricPoint>,
+) {
+    points.push(MetricPoint::gauge(
+        METRIC_GROUP_OFFSET,
+        labels.clone(),
+        m.committed_offset as f64,
+        HELP_GROUP_OFFSET,
+    ));
+
+    points.push(MetricPoint::gauge(
+        METRIC_GROUP_LAG,
+        labels.clone(),
+        m.lag as f64,
+        HELP_GROUP_LAG,
+    ));
+
+    if let Some(lag_seconds) = m.lag_seconds {
+        let mut lag_labels = labels.clone();
+        lag_labels.insert(
+            LABEL_COMPACTION_DETECTED.to_string(),
+            m.compaction_detected.to_string(),
+        );
+        lag_labels.insert(
+            LABEL_DATA_LOSS_DETECTED.to_string(),
+            m.data_loss_detected.to_string(),
+        );
+        points.push(MetricPoint::gauge(
+            METRIC_GROUP_LAG_SECONDS,
+            lag_labels,
+            lag_seconds,
+            HELP_GROUP_LAG_SECONDS,
+        ));
+    }
+
+    let mut data_loss_labels = Labels::new();
+    data_loss_labels.insert(LABEL_CLUSTER_NAME.to_string(), m.cluster_name.clone());
+    data_loss_labels.insert(LABEL_GROUP.to_string(), m.group_id.clone());
+    data_loss_labels.insert(LABEL_TOPIC.to_string(), m.topic.clone());
+    data_loss_labels.insert(LABEL_PARTITION.to_string(), m.partition.to_string());
+    add_custom_labels(&mut data_loss_labels, custom_labels);
+
+    points.push(MetricPoint::gauge(
+        METRIC_MESSAGES_LOST,
+        data_loss_labels.clone(),
+        m.messages_lost as f64,
+        HELP_MESSAGES_LOST,
+    ));
+
+    points.push(MetricPoint::gauge(
+        METRIC_RETENTION_MARGIN,
+        data_loss_labels.clone(),
+        m.retention_margin as f64,
+        HELP_RETENTION_MARGIN,
+    ));
+
+    points.push(MetricPoint::gauge(
+        METRIC_LAG_RETENTION_RATIO,
+        data_loss_labels,
+        m.lag_retention_ratio,
+        HELP_LAG_RETENTION_RATIO,
+    ));
 }
 
 /// Build cluster-level summary metric points (poll time, compaction count, data loss count).
@@ -508,13 +648,14 @@ pub fn build_cluster_summary_points(
     poll_time_ms: u64,
     compaction_detected_count: u64,
     data_loss_partition_count: u64,
+    skipped_partition_count: u64,
     custom_labels: &HashMap<String, String>,
 ) -> Vec<MetricPoint> {
     let mut poll_labels = Labels::new();
     poll_labels.insert(LABEL_CLUSTER_NAME.to_string(), cluster.to_string());
     add_custom_labels(&mut poll_labels, custom_labels);
 
-    vec![
+    let mut points = vec![
         MetricPoint::gauge(
             METRIC_POLL_TIME_MS,
             poll_labels.clone(),
@@ -529,11 +670,22 @@ pub fn build_cluster_summary_points(
         ),
         MetricPoint::gauge(
             METRIC_DATA_LOSS_PARTITIONS,
-            poll_labels,
+            poll_labels.clone(),
             data_loss_partition_count as f64,
             HELP_DATA_LOSS_PARTITIONS,
         ),
-    ]
+    ];
+
+    if skipped_partition_count > 0 {
+        points.push(MetricPoint::gauge(
+            METRIC_SKIPPED_PARTITIONS,
+            poll_labels,
+            skipped_partition_count as f64,
+            HELP_SKIPPED_PARTITIONS,
+        ));
+    }
+
+    points
 }
 
 impl Default for MetricsRegistry {
@@ -565,19 +717,6 @@ mod tests {
                 retention_margin: 100,
                 lag_retention_ratio: 9.09,
             }],
-            group_metrics: vec![GroupLagMetric {
-                cluster_name: "test-cluster".to_string(),
-                group_id: "test-group".to_string(),
-                max_lag: 10,
-                max_lag_seconds: Some(5.5),
-                sum_lag: 10,
-            }],
-            topic_metrics: vec![TopicLagMetric {
-                cluster_name: "test-cluster".to_string(),
-                group_id: "test-group".to_string(),
-                topic: "test-topic".to_string(),
-                sum_lag: 10,
-            }],
             partition_offsets: vec![PartitionOffsetMetric {
                 cluster_name: "test-cluster".to_string(),
                 topic: "test-topic".to_string(),
@@ -588,6 +727,7 @@ mod tests {
             poll_time_ms: 50,
             compaction_detected_count: 0,
             data_loss_partition_count: 0,
+            skipped_partition_count: 0,
         }
     }
 
@@ -705,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn test_granularity_topic_skips_partition_metrics() {
+    fn test_granularity_topic_omits_partition_labels() {
         let registry = MetricsRegistry::new();
         let metrics = make_lag_metrics();
 
@@ -718,13 +858,28 @@ mod tests {
 
         let output = registry.render_prometheus();
 
-        // Should have topic-level metrics
-        assert!(output.contains("kafka_consumergroup_group_max_lag"));
-        assert!(output.contains("kafka_consumergroup_group_topic_sum_lag"));
+        // Should have lag metrics (same metric names regardless of granularity)
+        assert!(output.contains("kafka_consumergroup_group_lag"));
+        assert!(output.contains("kafka_consumergroup_group_offset"));
 
-        // Should NOT have partition-level consumer group metrics
-        assert!(!output.contains("kafka_consumergroup_group_lag{"));
-        assert!(!output.contains("kafka_consumergroup_group_offset{"));
+        // Consumer group metrics should NOT have partition-level labels
+        for line in output.lines() {
+            if line.starts_with("kafka_consumergroup_") {
+                assert!(!line.contains("partition="), "unexpected partition= in: {line}");
+                assert!(
+                    !line.contains("member_host="),
+                    "unexpected member_host= in: {line}"
+                );
+                assert!(
+                    !line.contains("consumer_id="),
+                    "unexpected consumer_id= in: {line}"
+                );
+                assert!(
+                    !line.contains("client_id="),
+                    "unexpected client_id= in: {line}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -774,13 +929,15 @@ mod tests {
         let mut labels2 = Labels::new();
         labels2.insert(LABEL_CLUSTER_NAME.to_string(), "test-cluster".to_string());
         labels2.insert(LABEL_GROUP.to_string(), "group1".to_string());
+        labels2.insert(LABEL_TOPIC.to_string(), "topic1".to_string());
+        labels2.insert(LABEL_PARTITION.to_string(), "0".to_string());
         registry.push_points(
             "test-cluster",
             vec![MetricPoint::gauge(
-                METRIC_GROUP_MAX_LAG,
+                METRIC_GROUP_LAG,
                 labels2,
                 42.0,
-                HELP_GROUP_MAX_LAG,
+                HELP_GROUP_LAG,
             )],
         );
 
@@ -789,8 +946,295 @@ mod tests {
         let output = registry.render_prometheus();
         assert!(output.contains("kafka_partition_latest_offset"));
         assert!(output.contains("110"));
-        assert!(output.contains("kafka_consumergroup_group_max_lag"));
+        assert!(output.contains("kafka_consumergroup_group_lag"));
         assert!(output.contains("42"));
         assert_eq!(registry.cluster_count(), 1);
+    }
+
+    #[test]
+    fn test_cluster_summary_points() {
+        let points = build_cluster_summary_points("c1", 150, 3, 2, 0, &HashMap::new());
+
+        // Should have poll_time, compaction, data_loss (no skipped when 0)
+        assert_eq!(points.len(), 3);
+        let names: Vec<&str> = points.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&METRIC_POLL_TIME_MS));
+        assert!(names.contains(&METRIC_COMPACTION_DETECTED));
+        assert!(names.contains(&METRIC_DATA_LOSS_PARTITIONS));
+    }
+
+    #[test]
+    fn test_cluster_summary_includes_skipped_when_nonzero() {
+        let points = build_cluster_summary_points("c1", 100, 0, 0, 5, &HashMap::new());
+
+        assert_eq!(points.len(), 4);
+        let skipped = points.iter().find(|p| p.name == METRIC_SKIPPED_PARTITIONS);
+        assert!(skipped.is_some());
+        assert_eq!(skipped.unwrap().value.as_f64() as u64, 5);
+    }
+
+    /// Find the unique metric line matching `metric_prefix` and `label_filter`,
+    /// assert exactly one match, and return its parsed value.
+    fn find_metric_value(output: &str, metric_prefix: &str, label_filter: &str) -> f64 {
+        let lines: Vec<&str> = output
+            .lines()
+            .filter(|l| l.starts_with(metric_prefix) && l.contains(label_filter))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "Expected 1 line for {metric_prefix} with {label_filter}, got {}: {lines:?}",
+            lines.len()
+        );
+        lines[0]
+            .rsplit_once(' ')
+            .expect("metric line should have a value")
+            .1
+            .parse()
+            .expect("should parse as f64")
+    }
+
+    /// Regression: Topic granularity must pre-aggregate partitions per (group, topic).
+    /// Without aggregation, multiple partitions produce duplicate label sets which
+    /// Prometheus silently deduplicates (only last value wins).
+    #[test]
+    fn test_topic_granularity_sums_partitions() {
+        let registry = MetricsRegistry::new();
+
+        let metrics = LagMetrics {
+            partition_metrics: vec![
+                PartitionLagMetric {
+                    cluster_name: "c1".to_string(),
+                    group_id: "g1".to_string(),
+                    topic: "t1".to_string(),
+                    partition: 0,
+                    member_host: "h1".to_string(),
+                    consumer_id: "con1".to_string(),
+                    client_id: "cli1".to_string(),
+                    committed_offset: 90,
+                    lag: 10,
+                    lag_seconds: Some(5.0),
+                    compaction_detected: false,
+                    data_loss_detected: false,
+                    messages_lost: 0,
+                    retention_margin: 90,
+                    lag_retention_ratio: 10.0,
+                },
+                PartitionLagMetric {
+                    cluster_name: "c1".to_string(),
+                    group_id: "g1".to_string(),
+                    topic: "t1".to_string(),
+                    partition: 1,
+                    member_host: "h2".to_string(),
+                    consumer_id: "con2".to_string(),
+                    client_id: "cli2".to_string(),
+                    committed_offset: 180,
+                    lag: 20,
+                    lag_seconds: Some(3.0),
+                    compaction_detected: false,
+                    data_loss_detected: false,
+                    messages_lost: 0,
+                    retention_margin: 180,
+                    lag_retention_ratio: 10.0,
+                },
+                PartitionLagMetric {
+                    cluster_name: "c1".to_string(),
+                    group_id: "g1".to_string(),
+                    topic: "t1".to_string(),
+                    partition: 2,
+                    member_host: "h3".to_string(),
+                    consumer_id: "con3".to_string(),
+                    client_id: "cli3".to_string(),
+                    committed_offset: 270,
+                    lag: 30,
+                    lag_seconds: Some(8.0),
+                    compaction_detected: false,
+                    data_loss_detected: false,
+                    messages_lost: 0,
+                    retention_margin: 270,
+                    lag_retention_ratio: 15.0,
+                },
+            ],
+            partition_offsets: vec![],
+            poll_time_ms: 50,
+            compaction_detected_count: 0,
+            data_loss_partition_count: 0,
+            skipped_partition_count: 0,
+        };
+
+        registry.update_with_options("c1", &metrics, Granularity::Topic, &HashMap::new());
+        let output = registry.render_prometheus();
+        let filter = "group=\"g1\"";
+
+        // sum(10+20+30) = 60
+        let lag = find_metric_value(&output, "kafka_consumergroup_group_lag{", filter);
+        assert!((lag - 60.0).abs() < f64::EPSILON, "Expected lag=60, got {lag}");
+
+        // sum(90+180+270) = 540
+        let offset = find_metric_value(&output, "kafka_consumergroup_group_offset{", filter);
+        assert!((offset - 540.0).abs() < f64::EPSILON, "Expected offset=540, got {offset}");
+
+        // max(5.0, 3.0, 8.0) = 8.0
+        let lag_sec = find_metric_value(&output, "kafka_consumergroup_group_lag_seconds{", filter);
+        assert!((lag_sec - 8.0).abs() < f64::EPSILON, "Expected lag_seconds=8.0, got {lag_sec}");
+
+        // sum(0+0+0) = 0
+        let lost = find_metric_value(&output, "kafka_consumergroup_group_messages_lost{", filter);
+        assert!(lost.abs() < f64::EPSILON, "Expected messages_lost=0, got {lost}");
+
+        // min(90, 180, 270) = 90
+        let margin = find_metric_value(&output, "kafka_consumergroup_group_retention_margin{", filter);
+        assert!((margin - 90.0).abs() < f64::EPSILON, "Expected retention_margin=90, got {margin}");
+
+        // max(10.0, 10.0, 15.0) = 15.0
+        let ratio = find_metric_value(&output, "kafka_consumergroup_group_lag_retention_ratio{", filter);
+        assert!((ratio - 15.0).abs() < f64::EPSILON, "Expected lag_retention_ratio=15, got {ratio}");
+    }
+
+    /// Verify boolean OR aggregation: compaction_detected and data_loss_detected
+    /// propagate as "true" when any partition has them set.
+    #[test]
+    fn test_topic_granularity_boolean_or_aggregation() {
+        let registry = MetricsRegistry::new();
+
+        let metrics = LagMetrics {
+            partition_metrics: vec![
+                PartitionLagMetric {
+                    cluster_name: "c1".to_string(),
+                    group_id: "g1".to_string(),
+                    topic: "t1".to_string(),
+                    partition: 0,
+                    member_host: String::new(),
+                    consumer_id: String::new(),
+                    client_id: String::new(),
+                    committed_offset: 50,
+                    lag: 10,
+                    lag_seconds: Some(2.0),
+                    compaction_detected: true,
+                    data_loss_detected: false,
+                    messages_lost: 0,
+                    retention_margin: 50,
+                    lag_retention_ratio: 5.0,
+                },
+                PartitionLagMetric {
+                    cluster_name: "c1".to_string(),
+                    group_id: "g1".to_string(),
+                    topic: "t1".to_string(),
+                    partition: 1,
+                    member_host: String::new(),
+                    consumer_id: String::new(),
+                    client_id: String::new(),
+                    committed_offset: 100,
+                    lag: 5,
+                    lag_seconds: Some(1.0),
+                    compaction_detected: false,
+                    data_loss_detected: true,
+                    messages_lost: 3,
+                    retention_margin: 100,
+                    lag_retention_ratio: 2.0,
+                },
+            ],
+            partition_offsets: vec![],
+            poll_time_ms: 10,
+            compaction_detected_count: 1,
+            data_loss_partition_count: 1,
+            skipped_partition_count: 0,
+        };
+
+        registry.update_with_options("c1", &metrics, Granularity::Topic, &HashMap::new());
+        let output = registry.render_prometheus();
+
+        // lag_seconds line carries both boolean labels — verify OR propagation
+        let lag_sec_line: Vec<&str> = output
+            .lines()
+            .filter(|l| l.starts_with("kafka_consumergroup_group_lag_seconds{") && l.contains("group=\"g1\""))
+            .collect();
+        assert_eq!(lag_sec_line.len(), 1);
+        assert!(
+            lag_sec_line[0].contains("compaction_detected=\"true\""),
+            "Expected compaction_detected=true (OR), got: {}",
+            lag_sec_line[0]
+        );
+        assert!(
+            lag_sec_line[0].contains("data_loss_detected=\"true\""),
+            "Expected data_loss_detected=true (OR), got: {}",
+            lag_sec_line[0]
+        );
+
+        // messages_lost should be summed: 0+3 = 3
+        let lost = find_metric_value(&output, "kafka_consumergroup_group_messages_lost{", "group=\"g1\"");
+        assert!((lost - 3.0).abs() < f64::EPSILON, "Expected messages_lost=3, got {lost}");
+    }
+
+    #[test]
+    fn test_otel_excludes_stale_cluster() {
+        let registry = MetricsRegistry::with_staleness_threshold(Duration::from_millis(50));
+        registry.set_healthy(true);
+
+        // Insert data for two clusters using a metric that has cluster_name label
+        registry.begin_cycle("fresh");
+        let mut labels = Labels::new();
+        labels.insert(LABEL_CLUSTER_NAME.to_string(), "fresh".to_string());
+        registry.push_points(
+            "fresh",
+            vec![MetricPoint::gauge(
+                METRIC_POLL_TIME_MS,
+                labels,
+                100.0,
+                HELP_POLL_TIME_MS,
+            )],
+        );
+        registry.finish_cycle("fresh");
+
+        registry.begin_cycle("stale");
+        let mut labels2 = Labels::new();
+        labels2.insert(LABEL_CLUSTER_NAME.to_string(), "stale".to_string());
+        registry.push_points(
+            "stale",
+            vec![MetricPoint::gauge(
+                METRIC_POLL_TIME_MS,
+                labels2,
+                200.0,
+                HELP_POLL_TIME_MS,
+            )],
+        );
+        registry.finish_cycle("stale");
+
+        // Wait for staleness threshold to expire
+        std::thread::sleep(Duration::from_millis(150));
+
+        // Re-update only "fresh"
+        registry.begin_cycle("fresh");
+        let mut labels3 = Labels::new();
+        labels3.insert(LABEL_CLUSTER_NAME.to_string(), "fresh".to_string());
+        registry.push_points(
+            "fresh",
+            vec![MetricPoint::gauge(
+                METRIC_POLL_TIME_MS,
+                labels3,
+                100.0,
+                HELP_POLL_TIME_MS,
+            )],
+        );
+        registry.finish_cycle("fresh");
+
+        let otel_metrics = registry.get_otel_metrics();
+
+        // Collect all cluster_name attribute values from OTel data points
+        let cluster_names: Vec<&str> = otel_metrics
+            .iter()
+            .flat_map(|m| &m.data_points)
+            .filter_map(|dp| dp.attributes.get(LABEL_CLUSTER_NAME))
+            .map(String::as_str)
+            .collect();
+
+        assert!(
+            cluster_names.contains(&"fresh"),
+            "Expected 'fresh' cluster in OTel metrics, got: {cluster_names:?}"
+        );
+        assert!(
+            !cluster_names.contains(&"stale"),
+            "Stale cluster should be filtered from OTel metrics"
+        );
     }
 }

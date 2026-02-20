@@ -189,13 +189,13 @@ impl KafkaClient {
             match result {
                 Ok(consumer_group) => {
                     for elem in consumer_group.topic_partitions.elements() {
-                        if let rdkafka::Offset::Offset(offset) = elem.offset() {
-                            if offset >= 0 {
-                                offsets.insert(
-                                    TopicPartition::new(elem.topic(), elem.partition()),
-                                    offset,
-                                );
-                            }
+                        if let rdkafka::Offset::Offset(offset) = elem.offset()
+                            && offset >= 0
+                        {
+                            offsets.insert(
+                                TopicPartition::new(elem.topic(), elem.partition()),
+                                offset,
+                            );
                         }
                     }
                 }
@@ -302,9 +302,12 @@ impl KafkaClient {
         AdminOptions::new().request_timeout(Some(self.timeout))
     }
 
-    /// Fetch topics that have compaction enabled (cleanup.policy contains "compact")
+    /// Fetch topics that have compaction enabled (cleanup.policy contains "compact").
+    /// Batches `describe_configs` in chunks to avoid broker timeouts on large clusters.
     #[instrument(skip(self), fields(cluster = %self.config.name))]
     pub async fn fetch_compacted_topics(&self) -> Result<HashSet<String>> {
+        const BATCH_SIZE: usize = 500;
+
         let metadata = self.fetch_metadata()?;
         let topic_names: Vec<String> = metadata
             .topics()
@@ -316,44 +319,45 @@ impl KafkaClient {
             return Ok(HashSet::new());
         }
 
-        let resources: Vec<ResourceSpecifier> = topic_names
-            .iter()
-            .map(|name| ResourceSpecifier::Topic(name.as_str()))
-            .collect();
-
-        let opts = self.admin_options();
-        let results = self
-            .admin
-            .describe_configs(resources.iter(), &opts)
-            .await
-            .map_err(KlagError::Kafka)?;
-
         let mut compacted_topics = HashSet::new();
 
-        for result in results {
-            match result {
-                Ok(resource) => {
-                    // Extract topic name from OwnedResourceSpecifier
-                    let topic_name = match &resource.specifier {
-                        rdkafka::admin::OwnedResourceSpecifier::Topic(name) => name.clone(),
-                        _ => continue, // Skip non-topic resources
-                    };
-                    for entry in resource.entries {
-                        if entry.name == "cleanup.policy" {
-                            if let Some(value) = entry.value {
-                                if value.contains("compact") {
-                                    trace!(topic = %topic_name, cleanup_policy = %value, "Topic has compaction enabled");
-                                    compacted_topics.insert(topic_name.clone());
-                                }
+        for chunk in topic_names.chunks(BATCH_SIZE) {
+            let resources: Vec<ResourceSpecifier> = chunk
+                .iter()
+                .map(|name| ResourceSpecifier::Topic(name.as_str()))
+                .collect();
+
+            let opts = self.admin_options();
+            let results = self
+                .admin
+                .describe_configs(resources.iter(), &opts)
+                .await
+                .map_err(KlagError::Kafka)?;
+
+            for result in results {
+                match result {
+                    Ok(resource) => {
+                        // Extract topic name from OwnedResourceSpecifier
+                        let topic_name = match &resource.specifier {
+                            rdkafka::admin::OwnedResourceSpecifier::Topic(name) => name.clone(),
+                            _ => continue, // Skip non-topic resources
+                        };
+                        for entry in resource.entries {
+                            if entry.name == "cleanup.policy"
+                                && let Some(value) = entry.value
+                                && value.contains("compact")
+                            {
+                                trace!(topic = %topic_name, cleanup_policy = %value, "Topic has compaction enabled");
+                                compacted_topics.insert(topic_name.clone());
                             }
                         }
                     }
-                }
-                Err(err) => {
-                    warn!(
-                        error = %err,
-                        "Failed to describe config for resource"
-                    );
+                    Err(err) => {
+                        warn!(
+                            error = %err,
+                            "Failed to describe config for resource"
+                        );
+                    }
                 }
             }
         }

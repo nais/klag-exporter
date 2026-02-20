@@ -70,22 +70,6 @@ const OTEL_GAUGE_DEFS: &[(&str, &str)] = &[
         "Time lag in seconds for a consumer group partition",
     ),
     (
-        "kafka_consumergroup_group_max_lag",
-        "Maximum lag across all partitions for a consumer group",
-    ),
-    (
-        "kafka_consumergroup_group_sum_lag",
-        "Sum of lag across all partitions for a consumer group",
-    ),
-    (
-        "kafka_consumergroup_group_max_lag_seconds",
-        "Maximum time lag in seconds across all partitions",
-    ),
-    (
-        "kafka_consumergroup_group_topic_sum_lag",
-        "Sum of lag for a consumer group per topic",
-    ),
-    (
         "kafka_consumergroup_poll_time_ms",
         "Time taken to collect consumer group metrics in milliseconds",
     ),
