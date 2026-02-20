@@ -45,7 +45,7 @@ impl TimestampConsumer {
             consumer
                 .pool
                 .get_mut()
-                .expect("pool mutex poisoned")
+                .unwrap_or_else(PoisonError::into_inner)
                 .push(c);
         }
 
@@ -123,7 +123,8 @@ impl TimestampConsumer {
 
         let consumer = self.acquire()?;
 
-        // RAII guard ensures consumer is returned to pool even on panic
+        // RAII guard ensures consumer is returned to pool even on early return/panic.
+        // We borrow the consumer before wrapping it — the guard only owns it for Drop.
         struct PoolGuard<'a> {
             consumer: Option<BaseConsumer>,
             pool: &'a TimestampConsumer,
@@ -136,14 +137,16 @@ impl TimestampConsumer {
             }
         }
 
-        let guard = PoolGuard {
+        let mut guard = PoolGuard {
             consumer: Some(consumer),
             pool: self,
         };
-        let consumer = guard
-            .consumer
-            .as_ref()
-            .expect("consumer already taken from guard");
+        // We just set consumer to Some, so as_mut() always returns Some here.
+        // The guard retains ownership for Drop (pool return).
+        let Some(consumer) = guard.consumer.as_mut() else {
+            // Structurally unreachable — we just set it to Some above
+            return Ok(None);
+        };
 
         let mut tpl = TopicPartitionList::new();
         tpl.add_partition_offset(&tp.topic, tp.partition, Offset::Offset(offset))
