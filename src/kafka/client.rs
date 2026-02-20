@@ -105,7 +105,6 @@ impl KafkaClient {
             })
             .collect();
 
-        debug!(count = group_list.groups().len(), "Listed consumer groups");
         Ok(groups)
     }
 

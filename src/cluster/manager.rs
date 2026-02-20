@@ -56,10 +56,11 @@ impl ClusterManager {
                 config,
                 exporter_config.timestamp_sampling.max_concurrent_fetches,
             );
-            Some(TimestampSampler::new(
-                ts_consumer?,
+            let effective_cache_ttl = std::cmp::max(
                 exporter_config.timestamp_sampling.cache_ttl,
-            ))
+                exporter_config.poll_interval * 2,
+            );
+            Some(TimestampSampler::new(ts_consumer?, effective_cache_ttl))
         } else {
             None
         };
