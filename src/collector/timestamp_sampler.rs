@@ -117,80 +117,70 @@ impl std::fmt::Debug for TimestampSampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
-    #[test]
-    fn test_timestamp_cache_ttl_expiry() {
-        let cached = CachedTimestamp {
-            timestamp_ms: 1000,
-            offset: 100,
-            cached_at: Instant::now() - Duration::from_secs(120),
-        };
+    proptest! {
+        /// Entry is stale iff its age exceeds the TTL
+        #[test]
+        fn prop_cache_expires_after_ttl(
+            age_secs in 0u64..10_000,
+            ttl_secs in 1u64..5_000,
+        ) {
+            let entry = CachedTimestamp {
+                timestamp_ms: 0,
+                offset: 0,
+                cached_at: Instant::now() - Duration::from_secs(age_secs),
+            };
+            let ttl = Duration::from_secs(ttl_secs);
+            prop_assert_eq!(entry.cached_at.elapsed() >= ttl, age_secs >= ttl_secs);
+        }
 
-        let cache_ttl = Duration::from_secs(60);
-
-        // Entry should be expired — elapsed exceeds TTL
-        assert!(cached.cached_at.elapsed() >= cache_ttl);
-
-        // Fresh entry should NOT be expired
-        let fresh = CachedTimestamp {
-            timestamp_ms: 2000,
-            offset: 200,
-            cached_at: Instant::now(),
-        };
-        assert!(fresh.cached_at.elapsed() < cache_ttl);
-    }
-
-    #[test]
-    fn test_cache_invalidation_on_offset_change() {
-        let cached = CachedTimestamp {
-            timestamp_ms: 1000,
-            offset: 100,
-            cached_at: Instant::now(),
-        };
-
-        // Same offset → cache hit condition
-        assert_eq!(cached.offset, 100);
-        // Different offset → cache miss condition
-        assert_ne!(cached.offset, 150);
-    }
-
-    /// Verify that `clear_stale_entries` removes expired entries and keeps fresh ones.
-    #[test]
-    fn test_clear_stale_entries() {
-        let cache: DashMap<(String, TopicPartition), CachedTimestamp> = DashMap::new();
-        let ttl = Duration::from_secs(60);
-
-        // Insert a stale entry
-        cache.insert(
-            ("g1".to_string(), TopicPartition::new("t1", 0)),
-            CachedTimestamp {
+        /// Cache should miss when the stored offset differs from the query offset
+        #[test]
+        fn prop_cache_invalidates_on_offset_change(
+            stored_offset in 0i64..i64::MAX,
+            query_offset in 0i64..i64::MAX,
+        ) {
+            let cached = CachedTimestamp {
                 timestamp_ms: 1000,
-                offset: 10,
-                cached_at: Instant::now() - Duration::from_secs(120),
-            },
-        );
-        // Insert a fresh entry
-        cache.insert(
-            ("g1".to_string(), TopicPartition::new("t1", 1)),
-            CachedTimestamp {
-                timestamp_ms: 2000,
-                offset: 20,
+                offset: stored_offset,
                 cached_at: Instant::now(),
-            },
-        );
+            };
+            let is_hit = cached.offset == query_offset;
+            prop_assert_eq!(is_hit, stored_offset == query_offset);
+        }
 
-        assert_eq!(cache.len(), 2);
+        /// `retain` keeps only entries younger than TTL
+        #[test]
+        fn prop_clear_stale_retains_fresh(
+            stale_age in 61u64..10_000,
+            fresh_age in 0u64..59,
+        ) {
+            let cache: DashMap<(String, TopicPartition), CachedTimestamp> = DashMap::new();
+            let ttl = Duration::from_secs(60);
 
-        // Simulate clear_stale_entries logic
-        let now = Instant::now();
-        cache.retain(|_, v| now.duration_since(v.cached_at) < ttl);
+            cache.insert(
+                ("stale".to_string(), TopicPartition::new("t", 0)),
+                CachedTimestamp {
+                    timestamp_ms: 0,
+                    offset: 0,
+                    cached_at: Instant::now() - Duration::from_secs(stale_age),
+                },
+            );
+            cache.insert(
+                ("fresh".to_string(), TopicPartition::new("t", 0)),
+                CachedTimestamp {
+                    timestamp_ms: 0,
+                    offset: 0,
+                    cached_at: Instant::now() - Duration::from_secs(fresh_age),
+                },
+            );
 
-        // Only the fresh entry should remain
-        assert_eq!(cache.len(), 1);
-        assert!(
-            cache
-                .get(&("g1".to_string(), TopicPartition::new("t1", 1)))
-                .is_some()
-        );
+            let now = Instant::now();
+            cache.retain(|_, v| now.duration_since(v.cached_at) < ttl);
+
+            prop_assert_eq!(cache.len(), 1);
+            prop_assert!(cache.get(&("fresh".to_string(), TopicPartition::new("t", 0))).is_some());
+        }
     }
 }

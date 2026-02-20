@@ -7,6 +7,8 @@ mod http;
 mod kafka;
 mod leadership;
 mod metrics;
+#[cfg(test)]
+mod test_strategies;
 
 use crate::cluster::ClusterManager;
 use crate::config::Config;

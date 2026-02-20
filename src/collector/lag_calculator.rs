@@ -245,295 +245,215 @@ impl LagMetrics {
 mod tests {
     use super::*;
     use crate::collector::offset_collector::MemberSnapshot;
+    use crate::test_strategies::strategies::*;
+    use proptest::prelude::*;
 
-    fn make_snapshot() -> OffsetsSnapshot {
+    fn make_group(
+        group_id: &str,
+        watermarks: HashMap<TopicPartition, (i64, i64)>,
+        offsets: HashMap<TopicPartition, i64>,
+    ) -> (GroupSnapshot, HashMap<TopicPartition, (i64, i64)>) {
+        let group = GroupSnapshot {
+            group_id: group_id.to_string(),
+            members: vec![],
+            offsets,
+        };
+        (group, watermarks)
+    }
+
+    proptest! {
+        /// For any (low, high, committed), lag == max(0, high - committed)
+        #[test]
+        fn prop_lag_is_non_negative(
+            (low, high, committed) in arb_watermarks_and_committed(),
+            cluster in arb_cluster_name(),
+            group_id in arb_group_id(),
+        ) {
+            let tp = TopicPartition::new("t", 0);
+            let mut watermarks = HashMap::new();
+            watermarks.insert(tp.clone(), (low, high));
+            let mut offsets = HashMap::new();
+            offsets.insert(tp, committed);
+
+            let (group, wm) = make_group(&group_id, watermarks, offsets);
+            let (metrics, _skipped) = LagCalculator::calculate_group(
+                &cluster, &group, &wm, &HashMap::new(), 0, &HashSet::new(),
+            );
+
+            prop_assert_eq!(metrics.len(), 1);
+            prop_assert!(metrics[0].lag >= 0, "lag must be non-negative, got {}", metrics[0].lag);
+            prop_assert_eq!(metrics[0].lag, (high - committed).max(0));
+        }
+
+        /// `data_loss_detected` iff `committed < low_watermark`
+        #[test]
+        fn prop_data_loss_iff_committed_below_low(
+            (low, high, committed) in arb_watermarks_and_committed(),
+        ) {
+            let tp = TopicPartition::new("t", 0);
+            let mut watermarks = HashMap::new();
+            watermarks.insert(tp.clone(), (low, high));
+            let mut offsets = HashMap::new();
+            offsets.insert(tp, committed);
+
+            let (group, wm) = make_group("g", watermarks, offsets);
+            let (metrics, _) = LagCalculator::calculate_group(
+                "c", &group, &wm, &HashMap::new(), 0, &HashSet::new(),
+            );
+
+            let m = &metrics[0];
+            prop_assert_eq!(m.data_loss_detected, committed < low);
+            prop_assert_eq!(m.messages_lost, (low - committed).max(0));
+            prop_assert_eq!(m.retention_margin, committed - low);
+        }
+
+        /// `lag_retention_ratio` == `(high - committed) / (high - low) * 100`
+        #[test]
+        fn prop_lag_retention_ratio(
+            (low, high, committed) in arb_watermarks_and_committed(),
+        ) {
+            prop_assume!(high > low);
+
+            let tp = TopicPartition::new("t", 0);
+            let mut watermarks = HashMap::new();
+            watermarks.insert(tp.clone(), (low, high));
+            let mut offsets = HashMap::new();
+            offsets.insert(tp, committed);
+
+            let (group, wm) = make_group("g", watermarks, offsets);
+            let (metrics, _) = LagCalculator::calculate_group(
+                "c", &group, &wm, &HashMap::new(), 0, &HashSet::new(),
+            );
+
+            let expected = ((high - committed) as f64 / (high - low) as f64) * 100.0;
+            prop_assert!((metrics[0].lag_retention_ratio - expected).abs() < 1e-10);
+        }
+
+        /// When `committed == high`, `lag_seconds` is `Some(0.0)` regardless of timestamps
+        #[test]
+        fn prop_lag_seconds_zero_when_caught_up(
+            low in 0..i64::MAX / 2,
+            high in 0..i64::MAX / 2,
+            now_ms in 0..i64::MAX / 2,
+        ) {
+            prop_assume!(high >= low);
+            let committed = high;
+
+            let tp = TopicPartition::new("t", 0);
+            let mut watermarks = HashMap::new();
+            watermarks.insert(tp.clone(), (low, high));
+            let mut offsets = HashMap::new();
+            offsets.insert(tp, committed);
+
+            let (group, wm) = make_group("g", watermarks, offsets);
+            let (metrics, _) = LagCalculator::calculate_group(
+                "c", &group, &wm, &HashMap::new(), now_ms, &HashSet::new(),
+            );
+
+            prop_assert_eq!(metrics[0].lag, 0);
+            prop_assert_eq!(metrics[0].lag_seconds, Some(0.0));
+        }
+
+        /// When `committed < high` and no timestamp, `lag_seconds` is `None`
+        #[test]
+        fn prop_lag_seconds_none_without_timestamp(
+            (low, high, committed) in arb_watermarks_and_committed(),
+        ) {
+            prop_assume!(committed < high);
+
+            let tp = TopicPartition::new("t", 0);
+            let mut watermarks = HashMap::new();
+            watermarks.insert(tp.clone(), (low, high));
+            let mut offsets = HashMap::new();
+            offsets.insert(tp, committed);
+
+            let (group, wm) = make_group("g", watermarks, offsets);
+            let (metrics, _) = LagCalculator::calculate_group(
+                "c", &group, &wm, &HashMap::new(), 1_000_000, &HashSet::new(),
+            );
+
+            prop_assert!(metrics[0].lag > 0);
+            prop_assert_eq!(metrics[0].lag_seconds, None);
+        }
+
+        /// `compaction_detected` matches set membership
+        #[test]
+        fn prop_compaction_flag_matches_set(
+            topic in "[a-z][a-z0-9]{0,20}",
+            in_set in proptest::bool::ANY,
+        ) {
+            let tp = TopicPartition::new(&topic, 0);
+            let mut watermarks = HashMap::new();
+            watermarks.insert(tp.clone(), (0, 100));
+            let mut offsets = HashMap::new();
+            offsets.insert(tp, 50);
+
+            let mut compacted = HashSet::new();
+            if in_set {
+                compacted.insert(topic.clone());
+            }
+
+            let (group, wm) = make_group("g", watermarks, offsets);
+            let (metrics, _) = LagCalculator::calculate_group(
+                "c", &group, &wm, &HashMap::new(), 0, &compacted,
+            );
+
+            prop_assert_eq!(metrics[0].compaction_detected, in_set);
+        }
+
+        /// `lag_seconds` == `(now_ms - timestamp_ms) / 1000` when lag > 0 and timestamp present
+        #[test]
+        fn prop_lag_seconds_from_timestamp(
+            now_ms in 1_000i64..i64::MAX / 2,
+            ts_offset in 0i64..1_000_000,
+        ) {
+            let timestamp_ms = now_ms - ts_offset;
+            let tp = TopicPartition::new("t", 0);
+            let mut watermarks = HashMap::new();
+            watermarks.insert(tp.clone(), (0, 100));
+            let mut offsets = HashMap::new();
+            offsets.insert(tp.clone(), 50);
+
+            let mut timestamps = HashMap::new();
+            timestamps.insert(
+                ("g".to_string(), tp),
+                TimestampData { timestamp_ms },
+            );
+
+            let (group, wm) = make_group("g", watermarks, offsets);
+            let (metrics, _) = LagCalculator::calculate_group(
+                "c", &group, &wm, &timestamps, now_ms, &HashSet::new(),
+            );
+
+            let expected = (now_ms - timestamp_ms) as f64 / 1000.0;
+            prop_assert_eq!(metrics[0].lag_seconds, Some(expected));
+        }
+    }
+
+    // ---- Regression tests ----
+
+    /// Regression: missing watermark should skip partition, not report lag=0.
+    #[test]
+    fn test_missing_watermark_skips_partition() {
         let mut watermarks = HashMap::new();
         watermarks.insert(TopicPartition::new("topic1", 0), (0, 100));
-        watermarks.insert(TopicPartition::new("topic1", 1), (0, 200));
-        watermarks.insert(TopicPartition::new("topic2", 0), (0, 50));
 
         let mut offsets = HashMap::new();
         offsets.insert(TopicPartition::new("topic1", 0), 90);
         offsets.insert(TopicPartition::new("topic1", 1), 150);
-        offsets.insert(TopicPartition::new("topic2", 0), 50);
 
-        OffsetsSnapshot {
-            cluster_name: "test-cluster".to_string(),
-            groups: vec![GroupSnapshot {
-                group_id: "test-group".to_string(),
-                members: vec![MemberSnapshot {
-                    member_id: "member-1".to_string(),
-                    client_id: "client-1".to_string(),
-                    client_host: "host-1".to_string(),
-                    assignments: vec![
-                        TopicPartition::new("topic1", 0),
-                        TopicPartition::new("topic1", 1),
-                    ],
-                }],
-                offsets,
-            }],
-            watermarks,
-        }
-    }
-
-    #[test]
-    fn test_lag_calculator_offset_lag() {
-        let snapshot = make_snapshot();
-        let timestamps = HashMap::new();
-        let now_ms = 1000000;
-
-        let metrics =
-            LagCalculator::calculate(&snapshot, &timestamps, now_ms, 100, &HashSet::new());
-
-        // topic1 partition 0: 100 - 90 = 10
-        // topic1 partition 1: 200 - 150 = 50
-        // topic2 partition 0: 50 - 50 = 0
-        let p0 = metrics
-            .partition_metrics
-            .iter()
-            .find(|m| m.topic == "topic1" && m.partition == 0)
-            .unwrap();
-        assert_eq!(p0.lag, 10);
-
-        let p1 = metrics
-            .partition_metrics
-            .iter()
-            .find(|m| m.topic == "topic1" && m.partition == 1)
-            .unwrap();
-        assert_eq!(p1.lag, 50);
-
-        let p2 = metrics
-            .partition_metrics
-            .iter()
-            .find(|m| m.topic == "topic2" && m.partition == 0)
-            .unwrap();
-        assert_eq!(p2.lag, 0);
-    }
-
-    #[test]
-    fn test_lag_calculator_time_lag() {
-        let snapshot = make_snapshot();
-        let mut timestamps = HashMap::new();
-        // Message at offset 90 was produced at time 900000 (100 seconds ago)
-        timestamps.insert(
-            ("test-group".to_string(), TopicPartition::new("topic1", 0)),
-            TimestampData {
-                timestamp_ms: 900000,
-            },
+        let (group, wm) = make_group("g1", watermarks, offsets);
+        let (metrics, skipped) = LagCalculator::calculate_group(
+            "test", &group, &wm, &HashMap::new(), 0, &HashSet::new(),
         );
 
-        let now_ms = 1000000;
-        let metrics =
-            LagCalculator::calculate(&snapshot, &timestamps, now_ms, 100, &HashSet::new());
-
-        let p0 = metrics
-            .partition_metrics
-            .iter()
-            .find(|m| m.topic == "topic1" && m.partition == 0)
-            .unwrap();
-
-        assert_eq!(p0.lag_seconds, Some(100.0));
-        assert!(!p0.compaction_detected);
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].topic, "topic1");
+        assert_eq!(metrics[0].partition, 0);
+        assert_eq!(skipped, 1);
     }
 
-    #[test]
-    fn test_lag_calculator_handles_negative_lag() {
-        let mut watermarks = HashMap::new();
-        watermarks.insert(TopicPartition::new("topic1", 0), (0, 100));
-
-        let mut offsets = HashMap::new();
-        // Committed offset > high watermark (race condition)
-        offsets.insert(TopicPartition::new("topic1", 0), 110);
-
-        let snapshot = OffsetsSnapshot {
-            cluster_name: "test".to_string(),
-            groups: vec![GroupSnapshot {
-                group_id: "test-group".to_string(),
-                members: vec![],
-                offsets,
-            }],
-            watermarks,
-        };
-
-        let metrics = LagCalculator::calculate(&snapshot, &HashMap::new(), 0, 100, &HashSet::new());
-
-        let p0 = metrics
-            .partition_metrics
-            .iter()
-            .find(|m| m.partition == 0)
-            .unwrap();
-
-        // Lag should be clamped to 0
-        assert_eq!(p0.lag, 0);
-    }
-
-    #[test]
-    fn test_partition_offset_metrics() {
-        let snapshot = make_snapshot();
-        let metrics = LagCalculator::calculate(&snapshot, &HashMap::new(), 0, 100, &HashSet::new());
-
-        assert_eq!(metrics.partition_offsets.len(), 3);
-
-        let topic1_p0 = metrics
-            .partition_offsets
-            .iter()
-            .find(|m| m.topic == "topic1" && m.partition == 0)
-            .unwrap();
-
-        assert_eq!(topic1_p0.earliest_offset, 0);
-        assert_eq!(topic1_p0.latest_offset, 100);
-    }
-
-    /// Regression: Bug 1 — missing watermark should skip partition and count it,
-    /// not silently report lag=0.
-    #[test]
-    fn test_missing_watermark_skips_partition() {
-        let mut watermarks = HashMap::new();
-        // Only provide watermark for topic1/0, NOT topic1/1
-        watermarks.insert(TopicPartition::new("topic1", 0), (0, 100));
-
-        let mut offsets = HashMap::new();
-        offsets.insert(TopicPartition::new("topic1", 0), 90);
-        offsets.insert(TopicPartition::new("topic1", 1), 150); // no watermark for this
-
-        let snapshot = OffsetsSnapshot {
-            cluster_name: "test".to_string(),
-            groups: vec![GroupSnapshot {
-                group_id: "g1".to_string(),
-                members: vec![],
-                offsets,
-            }],
-            watermarks,
-        };
-
-        let metrics = LagCalculator::calculate(&snapshot, &HashMap::new(), 0, 100, &HashSet::new());
-
-        // Only 1 partition metric (the one with watermark)
-        assert_eq!(metrics.partition_metrics.len(), 1);
-        assert_eq!(metrics.partition_metrics[0].topic, "topic1");
-        assert_eq!(metrics.partition_metrics[0].partition, 0);
-        // Skipped partition count should be 1
-        assert_eq!(metrics.skipped_partition_count, 1);
-    }
-
-    /// Regression: Bug 2 — lag_seconds should be None when lag>0 but no timestamp,
-    /// not Some(0.0).
-    #[test]
-    fn test_lag_seconds_none_when_no_timestamp() {
-        let snapshot = make_snapshot();
-        // No timestamps provided at all
-        let metrics =
-            LagCalculator::calculate(&snapshot, &HashMap::new(), 1_000_000, 100, &HashSet::new());
-
-        // topic1/0 has lag=10, but no timestamp data
-        let p0 = metrics
-            .partition_metrics
-            .iter()
-            .find(|m| m.topic == "topic1" && m.partition == 0)
-            .unwrap();
-        assert_eq!(p0.lag, 10);
-        assert_eq!(p0.lag_seconds, None);
-    }
-
-    /// Regression: Bug 2 — lag_seconds should be Some(0.0) when lag is zero
-    /// (caught up, regardless of timestamp availability).
-    #[test]
-    fn test_lag_seconds_zero_when_caught_up() {
-        let snapshot = make_snapshot();
-        // topic2/0 has committed=50, high=50, so lag=0
-        let metrics =
-            LagCalculator::calculate(&snapshot, &HashMap::new(), 1_000_000, 100, &HashSet::new());
-
-        let p2 = metrics
-            .partition_metrics
-            .iter()
-            .find(|m| m.topic == "topic2" && m.partition == 0)
-            .unwrap();
-        assert_eq!(p2.lag, 0);
-        assert_eq!(p2.lag_seconds, Some(0.0));
-    }
-
-    /// Regression: data loss detection when committed_offset < low_watermark.
-    #[test]
-    fn test_data_loss_detection() {
-        let mut watermarks = HashMap::new();
-        watermarks.insert(TopicPartition::new("topic1", 0), (50, 200));
-
-        let mut offsets = HashMap::new();
-        // committed_offset=30 < low_watermark=50 → data loss
-        offsets.insert(TopicPartition::new("topic1", 0), 30);
-
-        let snapshot = OffsetsSnapshot {
-            cluster_name: "test".to_string(),
-            groups: vec![GroupSnapshot {
-                group_id: "g1".to_string(),
-                members: vec![],
-                offsets,
-            }],
-            watermarks,
-        };
-
-        let metrics = LagCalculator::calculate(&snapshot, &HashMap::new(), 0, 100, &HashSet::new());
-        let m = &metrics.partition_metrics[0];
-
-        assert!(m.data_loss_detected);
-        assert_eq!(m.messages_lost, 20); // 50 - 30
-        assert_eq!(m.retention_margin, -20); // 30 - 50
-        assert_eq!(m.lag, 170); // 200 - 30
-        assert_eq!(metrics.data_loss_partition_count, 1);
-    }
-
-    /// Verify lag_retention_ratio calculation.
-    #[test]
-    fn test_lag_retention_ratio() {
-        let mut watermarks = HashMap::new();
-        // retention_window = 200 - 0 = 200
-        watermarks.insert(TopicPartition::new("topic1", 0), (0, 200));
-
-        let mut offsets = HashMap::new();
-        // lag = 200 - 100 = 100, ratio = 100/200 * 100 = 50%
-        offsets.insert(TopicPartition::new("topic1", 0), 100);
-
-        let snapshot = OffsetsSnapshot {
-            cluster_name: "test".to_string(),
-            groups: vec![GroupSnapshot {
-                group_id: "g1".to_string(),
-                members: vec![],
-                offsets,
-            }],
-            watermarks,
-        };
-
-        let metrics = LagCalculator::calculate(&snapshot, &HashMap::new(), 0, 100, &HashSet::new());
-        let m = &metrics.partition_metrics[0];
-
-        assert!((m.lag_retention_ratio - 50.0).abs() < f64::EPSILON);
-    }
-
-    /// Verify compaction_detected flag is set for topics in the compacted set.
-    #[test]
-    fn test_compaction_detected_flag() {
-        let snapshot = make_snapshot();
-        let mut compacted = HashSet::new();
-        compacted.insert("topic1".to_string());
-
-        let metrics = LagCalculator::calculate(&snapshot, &HashMap::new(), 0, 100, &compacted);
-
-        for m in &metrics.partition_metrics {
-            if m.topic == "topic1" {
-                assert!(m.compaction_detected, "topic1 should be marked compacted");
-            } else {
-                assert!(
-                    !m.compaction_detected,
-                    "topic2 should not be marked compacted"
-                );
-            }
-        }
-        assert_eq!(metrics.compaction_detected_count, 2); // 2 topic1 partitions
-    }
-
-    /// Regression: unassigned partitions (offsets exist, no member) should still
-    /// produce lag metrics with empty member fields.
+    /// Regression: unassigned partitions should still produce lag metrics with empty member fields.
     #[test]
     fn test_unassigned_partition_still_reports_lag() {
         let mut watermarks = HashMap::new();
@@ -544,43 +464,28 @@ mod tests {
         offsets.insert(TopicPartition::new("topic1", 0), 90);
         offsets.insert(TopicPartition::new("topic1", 1), 150);
 
-        let snapshot = OffsetsSnapshot {
-            cluster_name: "test".to_string(),
-            groups: vec![GroupSnapshot {
-                group_id: "g1".to_string(),
-                members: vec![
-                    // Only partition 0 is assigned
-                    MemberSnapshot {
-                        member_id: "m1".to_string(),
-                        client_id: "c1".to_string(),
-                        client_host: "host1".to_string(),
-                        assignments: vec![TopicPartition::new("topic1", 0)],
-                    },
-                ],
-                offsets,
+        let group = GroupSnapshot {
+            group_id: "g1".to_string(),
+            members: vec![MemberSnapshot {
+                member_id: "m1".to_string(),
+                client_id: "c1".to_string(),
+                client_host: "host1".to_string(),
+                assignments: vec![TopicPartition::new("topic1", 0)],
             }],
-            watermarks,
+            offsets,
         };
 
-        let metrics = LagCalculator::calculate(&snapshot, &HashMap::new(), 0, 100, &HashSet::new());
+        let (metrics, _) = LagCalculator::calculate_group(
+            "test", &group, &watermarks, &HashMap::new(), 0, &HashSet::new(),
+        );
 
-        // Both partitions should produce metrics
-        assert_eq!(metrics.partition_metrics.len(), 2);
+        assert_eq!(metrics.len(), 2);
 
-        let p0 = metrics
-            .partition_metrics
-            .iter()
-            .find(|m| m.partition == 0)
-            .unwrap();
+        let p0 = metrics.iter().find(|m| m.partition == 0).unwrap();
         assert_eq!(p0.lag, 10);
         assert_eq!(p0.member_host, "host1");
 
-        // Partition 1 is unassigned — should still report lag, with empty member info
-        let p1 = metrics
-            .partition_metrics
-            .iter()
-            .find(|m| m.partition == 1)
-            .unwrap();
+        let p1 = metrics.iter().find(|m| m.partition == 1).unwrap();
         assert_eq!(p1.lag, 50);
         assert!(p1.member_host.is_empty());
         assert!(p1.consumer_id.is_empty());

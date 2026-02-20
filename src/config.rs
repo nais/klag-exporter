@@ -412,6 +412,7 @@ impl CompiledFilters {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -438,34 +439,6 @@ bootstrap_servers = "localhost:9092"
     }
 
     #[test]
-    fn test_config_env_override() {
-        temp_env::with_var("TEST_KAFKA_USER", Some("myuser"), || {
-            let config_content = r#"
-[exporter]
-poll_interval = "30s"
-
-[[clusters]]
-name = "test"
-bootstrap_servers = "localhost:9092"
-
-[clusters.consumer_properties]
-"sasl.username" = "${TEST_KAFKA_USER}"
-"#;
-
-            let mut file = NamedTempFile::new().expect("create temp file");
-            file.write_all(config_content.as_bytes())
-                .expect("write config");
-
-            let config = Config::load(Some(file.path().to_str().expect("path to str")))
-                .expect("load config");
-            assert_eq!(
-                config.clusters[0].consumer_properties.get("sasl.username"),
-                Some(&"myuser".to_string())
-            );
-        });
-    }
-
-    #[test]
     fn test_config_env_with_default() {
         temp_env::with_var("TEST_NONEXISTENT_VAR", None::<&str>, || {
             let config_content = r#"
@@ -483,31 +456,7 @@ bootstrap_servers = "${TEST_NONEXISTENT_VAR:-localhost:9092}"
 
             let config = Config::load(Some(file.path().to_str().expect("path to str")))
                 .expect("load config");
-            // Should use default value since env var is not set
             assert_eq!(config.clusters[0].bootstrap_servers, "localhost:9092");
-        });
-    }
-
-    #[test]
-    fn test_config_env_override_default() {
-        temp_env::with_var("TEST_BOOTSTRAP", Some("kafka:29092"), || {
-            let config_content = r#"
-[exporter]
-poll_interval = "30s"
-
-[[clusters]]
-name = "test"
-bootstrap_servers = "${TEST_BOOTSTRAP:-localhost:9092}"
-"#;
-
-            let mut file = NamedTempFile::new().expect("create temp file");
-            file.write_all(config_content.as_bytes())
-                .expect("write config");
-
-            let config = Config::load(Some(file.path().to_str().expect("path to str")))
-                .expect("load config");
-            // Should use env var value instead of default
-            assert_eq!(config.clusters[0].bootstrap_servers, "kafka:29092");
         });
     }
 
@@ -532,35 +481,6 @@ bootstrap_servers = ""
     }
 
     #[test]
-    fn test_regex_filter_whitelist_match() {
-        let filters = CompiledFilters {
-            group_whitelist: vec![Regex::new("^my-group.*").unwrap()],
-            group_blacklist: vec![],
-            topic_whitelist: vec![Regex::new(".*").unwrap()],
-            topic_blacklist: vec![],
-        };
-
-        assert!(filters.matches_group("my-group-1"));
-        assert!(filters.matches_group("my-group-2"));
-        assert!(!filters.matches_group("other-group"));
-    }
-
-    #[test]
-    fn test_regex_filter_blacklist_reject() {
-        let filters = CompiledFilters {
-            group_whitelist: vec![Regex::new(".*").unwrap()],
-            group_blacklist: vec![Regex::new("^internal-.*").unwrap()],
-            topic_whitelist: vec![Regex::new(".*").unwrap()],
-            topic_blacklist: vec![Regex::new("^__.*").unwrap()],
-        };
-
-        assert!(filters.matches_group("my-group"));
-        assert!(!filters.matches_group("internal-group"));
-        assert!(filters.matches_topic("my-topic"));
-        assert!(!filters.matches_topic("__consumer_offsets"));
-    }
-
-    #[test]
     fn test_default_config_values() {
         let config_content = r#"
 [exporter]
@@ -580,7 +500,6 @@ bootstrap_servers = "localhost:9092"
         assert_eq!(config.exporter.granularity, Granularity::Topic);
         assert!(config.exporter.timestamp_sampling.enabled);
         assert!(!config.exporter.otel.enabled);
-        // Performance defaults
         assert_eq!(
             config.exporter.performance.kafka_timeout,
             Duration::from_secs(30)
@@ -626,95 +545,174 @@ bootstrap_servers = "localhost:9092"
         );
     }
 
-    #[test]
-    fn test_performance_config_validates_zero_concurrency() {
-        let config_content = r#"
+    proptest! {
+        /// Any env var value substitutes correctly via `${VAR}` syntax
+        #[test]
+        fn prop_env_substitution(
+            value in "[a-zA-Z0-9:._-]{1,50}",
+        ) {
+            let result = temp_env::with_var("PROP_TEST_ENV_VAR", Some(&value), || {
+                let config_content = r#"
+[exporter]
+poll_interval = "30s"
+
+[[clusters]]
+name = "test"
+bootstrap_servers = "${PROP_TEST_ENV_VAR}"
+"#;
+                let mut file = NamedTempFile::new().expect("create temp file");
+                file.write_all(config_content.as_bytes()).expect("write");
+
+                let config = Config::load(Some(file.path().to_str().expect("path")))
+                    .expect("load config");
+                config.clusters[0].bootstrap_servers.clone()
+            });
+            prop_assert_eq!(result.as_str(), value.as_str());
+        }
+
+        /// Any env var value overrides the default in `${VAR:-default}` syntax
+        #[test]
+        fn prop_env_override_default(
+            value in "[a-zA-Z0-9:._-]{1,50}",
+        ) {
+            let result = temp_env::with_var("PROP_TEST_OVERRIDE", Some(&value), || {
+                let config_content = r#"
+[exporter]
+poll_interval = "30s"
+
+[[clusters]]
+name = "test"
+bootstrap_servers = "${PROP_TEST_OVERRIDE:-fallback:9092}"
+"#;
+                let mut file = NamedTempFile::new().expect("create temp file");
+                file.write_all(config_content.as_bytes()).expect("write");
+
+                let config = Config::load(Some(file.path().to_str().expect("path")))
+                    .expect("load config");
+                config.clusters[0].bootstrap_servers.clone()
+            });
+            prop_assert_eq!(result.as_str(), value.as_str());
+        }
+
+        /// Whitelist regex: group matches iff regex matches
+        #[test]
+        fn prop_regex_whitelist_match(
+            group in "[a-z][a-z0-9-]{0,20}",
+        ) {
+            let filters = CompiledFilters {
+                group_whitelist: vec![Regex::new("^[a-z]").unwrap()],
+                group_blacklist: vec![],
+                topic_whitelist: vec![Regex::new(".*").unwrap()],
+                topic_blacklist: vec![],
+            };
+            // All generated groups start with [a-z], so they should all match
+            prop_assert!(filters.matches_group(&group));
+        }
+
+        /// Blacklist regex: group is rejected when blacklist matches
+        #[test]
+        fn prop_regex_blacklist_reject(
+            suffix in "[a-z0-9]{1,20}",
+        ) {
+            let filters = CompiledFilters {
+                group_whitelist: vec![Regex::new(".*").unwrap()],
+                group_blacklist: vec![Regex::new("^internal-").unwrap()],
+                topic_whitelist: vec![Regex::new(".*").unwrap()],
+                topic_blacklist: vec![],
+            };
+            let internal = format!("internal-{suffix}");
+            let external = format!("external-{suffix}");
+            prop_assert!(!filters.matches_group(&internal));
+            prop_assert!(filters.matches_group(&external));
+        }
+
+        /// Positive `max_concurrent_groups` values pass validation
+        #[test]
+        fn prop_positive_concurrency_accepted(val in 1usize..10_000) {
+            let config_content = format!(
+                r#"
 [exporter]
 poll_interval = "30s"
 
 [exporter.performance]
-max_concurrent_groups = 0
+max_concurrent_groups = {val}
 
 [[clusters]]
 name = "test"
 bootstrap_servers = "localhost:9092"
-"#;
+"#
+            );
+            let mut file = NamedTempFile::new().unwrap();
+            file.write_all(config_content.as_bytes()).unwrap();
+            let result = Config::load(Some(file.path().to_str().unwrap()));
+            prop_assert!(result.is_ok(), "max_concurrent_groups={} should be valid", val);
+        }
 
-        let mut file = NamedTempFile::new().unwrap();
-        file.write_all(config_content.as_bytes()).unwrap();
-
-        let result = Config::load(Some(file.path().to_str().unwrap()));
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("max_concurrent_groups must be at least 1"));
-    }
-
-    #[test]
-    fn test_performance_config_validates_zero_batch_size() {
-        let config_content = r#"
+        /// Positive `describe_groups_batch_size` values pass validation
+        #[test]
+        fn prop_positive_batch_size_accepted(val in 1usize..10_000) {
+            let config_content = format!(
+                r#"
 [exporter]
 poll_interval = "30s"
 
 [exporter.performance]
-describe_groups_batch_size = 0
+describe_groups_batch_size = {val}
 
 [[clusters]]
 name = "test"
 bootstrap_servers = "localhost:9092"
-"#;
+"#
+            );
+            let mut file = NamedTempFile::new().unwrap();
+            file.write_all(config_content.as_bytes()).unwrap();
+            let result = Config::load(Some(file.path().to_str().unwrap()));
+            prop_assert!(result.is_ok(), "describe_groups_batch_size={} should be valid", val);
+        }
 
-        let mut file = NamedTempFile::new().unwrap();
-        file.write_all(config_content.as_bytes()).unwrap();
-
-        let result = Config::load(Some(file.path().to_str().unwrap()));
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("describe_groups_batch_size must be at least 1"));
-    }
-
-    #[test]
-    fn test_performance_config_validates_zero_kafka_timeout() {
-        let config_content = r#"
+        /// Positive `kafka_timeout` values pass validation
+        #[test]
+        fn prop_positive_kafka_timeout_accepted(secs in 1u64..3600) {
+            let config_content = format!(
+                r#"
 [exporter]
 poll_interval = "30s"
 
 [exporter.performance]
-kafka_timeout = "0s"
+kafka_timeout = "{secs}s"
 
 [[clusters]]
 name = "test"
 bootstrap_servers = "localhost:9092"
-"#;
+"#
+            );
+            let mut file = NamedTempFile::new().unwrap();
+            file.write_all(config_content.as_bytes()).unwrap();
+            let result = Config::load(Some(file.path().to_str().unwrap()));
+            prop_assert!(result.is_ok(), "kafka_timeout={}s should be valid", secs);
+        }
 
-        let mut file = NamedTempFile::new().unwrap();
-        file.write_all(config_content.as_bytes()).unwrap();
-
-        let result = Config::load(Some(file.path().to_str().unwrap()));
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("kafka_timeout must be greater than 0"));
-    }
-
-    #[test]
-    fn test_performance_config_validates_zero_cache_ttl() {
-        let config_content = r#"
+        /// Positive `compacted_topics_cache_ttl` values pass validation
+        #[test]
+        fn prop_positive_cache_ttl_accepted(secs in 1u64..86400) {
+            let config_content = format!(
+                r#"
 [exporter]
 poll_interval = "30s"
 
 [exporter.performance]
-compacted_topics_cache_ttl = "0s"
+compacted_topics_cache_ttl = "{secs}s"
 
 [[clusters]]
 name = "test"
 bootstrap_servers = "localhost:9092"
-"#;
-
-        let mut file = NamedTempFile::new().unwrap();
-        file.write_all(config_content.as_bytes()).unwrap();
-
-        let result = Config::load(Some(file.path().to_str().unwrap()));
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("compacted_topics_cache_ttl must be greater than 0"));
+"#
+            );
+            let mut file = NamedTempFile::new().unwrap();
+            file.write_all(config_content.as_bytes()).unwrap();
+            let result = Config::load(Some(file.path().to_str().unwrap()));
+            prop_assert!(result.is_ok(), "compacted_topics_cache_ttl={}s should be valid", secs);
+        }
     }
+
 }

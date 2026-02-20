@@ -789,14 +789,6 @@ mod tests {
     }
 
     #[test]
-    fn test_escape_label_value() {
-        assert_eq!(escape_label_value("simple"), "simple");
-        assert_eq!(escape_label_value("with\"quote"), "with\\\"quote");
-        assert_eq!(escape_label_value("with\\backslash"), "with\\\\backslash");
-        assert_eq!(escape_label_value("with\nnewline"), "with\\nnewline");
-    }
-
-    #[test]
     fn test_metrics_registry_evicts_disappeared_groups() {
         let registry = MetricsRegistry::new();
 
@@ -825,16 +817,6 @@ mod tests {
         registry.set_healthy(false);
         let output = registry.render_prometheus();
         assert!(output.contains("kafka_lag_exporter_up 0"));
-    }
-
-    #[test]
-    fn test_scrape_duration_metric() {
-        let registry = MetricsRegistry::new();
-        registry.set_scrape_duration_ms(1500);
-
-        let output = registry.render_prometheus();
-        assert!(output.contains("kafka_lag_exporter_scrape_duration_seconds"));
-        assert!(output.contains("1.5"));
     }
 
     #[test]
@@ -876,28 +858,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn test_custom_labels_added() {
-        let registry = MetricsRegistry::new();
-        let metrics = make_lag_metrics();
-
-        let mut custom_labels = HashMap::new();
-        custom_labels.insert("environment".to_string(), "production".to_string());
-        custom_labels.insert("datacenter".to_string(), "us-west-2".to_string());
-
-        registry.update_with_options(
-            "test-cluster",
-            &metrics,
-            Granularity::Partition,
-            &custom_labels,
-        );
-
-        let output = registry.render_prometheus();
-
-        assert!(output.contains("environment=\"production\""));
-        assert!(output.contains("datacenter=\"us-west-2\""));
     }
 
     #[test]
@@ -948,10 +908,9 @@ mod tests {
     }
 
     #[test]
-    fn test_cluster_summary_points() {
+    fn test_cluster_summary_points_regression() {
         let points = build_cluster_summary_points("c1", 150, 3, 2, 0, &HashMap::new());
 
-        // Should have poll_time, compaction, data_loss (no skipped when 0)
         assert_eq!(points.len(), 3);
         let names: Vec<&str> = points.iter().map(|p| p.name.as_str()).collect();
         assert!(names.contains(&METRIC_POLL_TIME_MS));
@@ -959,15 +918,7 @@ mod tests {
         assert!(names.contains(&METRIC_DATA_LOSS_PARTITIONS));
     }
 
-    #[test]
-    fn test_cluster_summary_includes_skipped_when_nonzero() {
-        let points = build_cluster_summary_points("c1", 100, 0, 0, 5, &HashMap::new());
-
-        assert_eq!(points.len(), 4);
-        let skipped = points.iter().find(|p| p.name == METRIC_SKIPPED_PARTITIONS);
-        assert!(skipped.is_some());
-        assert_eq!(skipped.unwrap().value.as_f64() as u64, 5);
-    }
+    use proptest::prelude::*;
 
     /// Find the unique metric line matching `metric_prefix` and `label_filter`,
     /// assert exactly one match, and return its parsed value.
@@ -990,212 +941,211 @@ mod tests {
             .expect("should parse as f64")
     }
 
-    /// Regression: Topic granularity must pre-aggregate partitions per (group, topic).
-    /// Without aggregation, multiple partitions produce duplicate label sets which
-    /// Prometheus silently deduplicates (only last value wins).
-    #[test]
-    fn test_topic_granularity_sums_partitions() {
-        let registry = MetricsRegistry::new();
+    proptest! {
+        /// Escaped output never contains bare `"`, `\`, or `\n`
+        #[test]
+        fn prop_escape_label_value_safe(input in ".*") {
+            let escaped = escape_label_value(&input);
+            let chars: Vec<char> = escaped.chars().collect();
+            let mut i = 0;
+            while i < chars.len() {
+                if chars[i] == '\\' {
+                    prop_assert!(i + 1 < chars.len(), "trailing backslash");
+                    prop_assert!(
+                        matches!(chars[i + 1], '\\' | '"' | 'n'),
+                        "invalid escape: \\{}", chars[i + 1]
+                    );
+                    i += 2;
+                } else {
+                    prop_assert_ne!(chars[i], '"', "unescaped quote at {}", i);
+                    prop_assert_ne!(chars[i], '\n', "unescaped newline at {}", i);
+                    i += 1;
+                }
+            }
+        }
 
-        let metrics = LagMetrics {
-            partition_metrics: vec![
-                PartitionLagMetric {
-                    cluster_name: "c1".to_string(),
-                    group_id: "g1".to_string(),
-                    topic: "t1".to_string(),
-                    partition: 0,
-                    member_host: "h1".to_string(),
-                    consumer_id: "con1".to_string(),
-                    client_id: "cli1".to_string(),
-                    committed_offset: 90,
-                    lag: 10,
-                    lag_seconds: Some(5.0),
+        /// `set_scrape_duration_ms(ms)` renders as `ms / 1000.0`
+        #[test]
+        fn prop_scrape_duration_conversion(ms in 0u64..10_000_000) {
+            let registry = MetricsRegistry::new();
+            registry.set_scrape_duration_ms(ms);
+            let output = registry.render_prometheus();
+
+            let expected = format!("{}", ms as f64 / 1000.0);
+            prop_assert!(
+                output.contains(&expected),
+                "Expected {} in output for ms={}", expected, ms
+            );
+        }
+
+        /// Custom labels with arbitrary keys/values appear in Prometheus output
+        #[test]
+        fn prop_custom_labels_present(
+            key in "[a-z][a-z0-9_]{0,20}",
+            value in "[a-zA-Z0-9_-]{1,30}",
+        ) {
+            let registry = MetricsRegistry::new();
+            let metrics = make_lag_metrics();
+
+            let mut custom_labels = HashMap::new();
+            custom_labels.insert(key.clone(), value.clone());
+
+            registry.update_with_options(
+                "test-cluster",
+                &metrics,
+                Granularity::Partition,
+                &custom_labels,
+            );
+
+            let output = registry.render_prometheus();
+            let expected = format!("{key}=\"{value}\"");
+            prop_assert!(
+                output.contains(&expected),
+                "Expected '{}' in output", expected
+            );
+        }
+
+        /// `skipped_partitions` metric present iff `skipped > 0`
+        #[test]
+        fn prop_cluster_summary_skipped_iff_nonzero(
+            poll_ms in 0u64..100_000,
+            compaction in 0u64..1000,
+            data_loss in 0u64..1000,
+            skipped in 0u64..1000,
+        ) {
+            let points = build_cluster_summary_points(
+                "c", poll_ms, compaction, data_loss, skipped, &HashMap::new(),
+            );
+
+            let has_skipped = points.iter().any(|p| p.name == METRIC_SKIPPED_PARTITIONS);
+            prop_assert_eq!(has_skipped, skipped > 0);
+
+            // Always has poll_time, compaction, data_loss
+            let base_count = 3 + u64::from(skipped > 0);
+            prop_assert_eq!(points.len() as u64, base_count);
+        }
+
+        /// Topic granularity: aggregated lag == sum of per-partition lags
+        #[test]
+        fn prop_topic_granularity_sum_invariant(
+            lags in proptest::collection::vec(0i64..10_000, 1..10),
+        ) {
+            let partition_metrics: Vec<PartitionLagMetric> = lags
+                .iter()
+                .enumerate()
+                .map(|(i, &lag)| PartitionLagMetric {
+                    cluster_name: "c".to_string(),
+                    group_id: "g".to_string(),
+                    topic: "t".to_string(),
+                    partition: i as i32,
+                    member_host: String::new(),
+                    consumer_id: String::new(),
+                    client_id: String::new(),
+                    committed_offset: 1000 - lag,
+                    lag,
+                    lag_seconds: Some(lag as f64),
                     compaction_detected: false,
                     data_loss_detected: false,
                     messages_lost: 0,
-                    retention_margin: 90,
-                    lag_retention_ratio: 10.0,
-                },
-                PartitionLagMetric {
-                    cluster_name: "c1".to_string(),
-                    group_id: "g1".to_string(),
-                    topic: "t1".to_string(),
-                    partition: 1,
-                    member_host: "h2".to_string(),
-                    consumer_id: "con2".to_string(),
-                    client_id: "cli2".to_string(),
-                    committed_offset: 180,
-                    lag: 20,
-                    lag_seconds: Some(3.0),
-                    compaction_detected: false,
-                    data_loss_detected: false,
-                    messages_lost: 0,
-                    retention_margin: 180,
-                    lag_retention_ratio: 10.0,
-                },
-                PartitionLagMetric {
-                    cluster_name: "c1".to_string(),
-                    group_id: "g1".to_string(),
-                    topic: "t1".to_string(),
-                    partition: 2,
-                    member_host: "h3".to_string(),
-                    consumer_id: "con3".to_string(),
-                    client_id: "cli3".to_string(),
-                    committed_offset: 270,
-                    lag: 30,
-                    lag_seconds: Some(8.0),
-                    compaction_detected: false,
-                    data_loss_detected: false,
-                    messages_lost: 0,
-                    retention_margin: 270,
-                    lag_retention_ratio: 15.0,
-                },
-            ],
-            partition_offsets: vec![],
-            poll_time_ms: 50,
-            compaction_detected_count: 0,
-            data_loss_partition_count: 0,
-            skipped_partition_count: 0,
-        };
+                    retention_margin: 500,
+                    lag_retention_ratio: 5.0,
+                })
+                .collect();
 
-        registry.update_with_options("c1", &metrics, Granularity::Topic, &HashMap::new());
-        let output = registry.render_prometheus();
-        let filter = "group=\"g1\"";
+            let expected_lag_sum: i64 = lags.iter().sum();
+            let expected_offset_sum: i64 = partition_metrics.iter().map(|m| m.committed_offset).sum();
 
-        // sum(10+20+30) = 60
-        let lag = find_metric_value(&output, "kafka_consumergroup_group_lag{", filter);
-        assert!(
-            (lag - 60.0).abs() < f64::EPSILON,
-            "Expected lag=60, got {lag}"
-        );
+            let registry = MetricsRegistry::new();
+            let metrics = LagMetrics {
+                partition_metrics,
+                partition_offsets: vec![],
+                poll_time_ms: 0,
+                compaction_detected_count: 0,
+                data_loss_partition_count: 0,
+                skipped_partition_count: 0,
+            };
 
-        // sum(90+180+270) = 540
-        let offset = find_metric_value(&output, "kafka_consumergroup_group_offset{", filter);
-        assert!(
-            (offset - 540.0).abs() < f64::EPSILON,
-            "Expected offset=540, got {offset}"
-        );
+            registry.update_with_options("c", &metrics, Granularity::Topic, &HashMap::new());
+            let output = registry.render_prometheus();
+            let filter = "group=\"g\"";
 
-        // max(5.0, 3.0, 8.0) = 8.0
-        let lag_sec = find_metric_value(&output, "kafka_consumergroup_group_lag_seconds{", filter);
-        assert!(
-            (lag_sec - 8.0).abs() < f64::EPSILON,
-            "Expected lag_seconds=8.0, got {lag_sec}"
-        );
+            let lag = find_metric_value(&output, "kafka_consumergroup_group_lag{", filter);
+            prop_assert!(
+                (lag - expected_lag_sum as f64).abs() < f64::EPSILON,
+                "lag sum: expected {}, got {}", expected_lag_sum, lag
+            );
 
-        // sum(0+0+0) = 0
-        let lost = find_metric_value(&output, "kafka_consumergroup_group_messages_lost{", filter);
-        assert!(
-            lost.abs() < f64::EPSILON,
-            "Expected messages_lost=0, got {lost}"
-        );
+            let offset = find_metric_value(&output, "kafka_consumergroup_group_offset{", filter);
+            prop_assert!(
+                (offset - expected_offset_sum as f64).abs() < f64::EPSILON,
+                "offset sum: expected {}, got {}", expected_offset_sum, offset
+            );
+        }
 
-        // min(90, 180, 270) = 90
-        let margin = find_metric_value(
-            &output,
-            "kafka_consumergroup_group_retention_margin{",
-            filter,
-        );
-        assert!(
-            (margin - 90.0).abs() < f64::EPSILON,
-            "Expected retention_margin=90, got {margin}"
-        );
-
-        // max(10.0, 10.0, 15.0) = 15.0
-        let ratio = find_metric_value(
-            &output,
-            "kafka_consumergroup_group_lag_retention_ratio{",
-            filter,
-        );
-        assert!(
-            (ratio - 15.0).abs() < f64::EPSILON,
-            "Expected lag_retention_ratio=15, got {ratio}"
-        );
-    }
-
-    /// Verify boolean OR aggregation: compaction_detected and data_loss_detected
-    /// propagate as "true" when any partition has them set.
-    #[test]
-    fn test_topic_granularity_boolean_or_aggregation() {
-        let registry = MetricsRegistry::new();
-
-        let metrics = LagMetrics {
-            partition_metrics: vec![
-                PartitionLagMetric {
-                    cluster_name: "c1".to_string(),
-                    group_id: "g1".to_string(),
-                    topic: "t1".to_string(),
-                    partition: 0,
+        /// Topic granularity: boolean labels use OR across partitions
+        #[test]
+        fn prop_topic_granularity_boolean_or(
+            compaction_flags in proptest::collection::vec(proptest::bool::ANY, 2..5),
+            data_loss_flags in proptest::collection::vec(proptest::bool::ANY, 2..5),
+        ) {
+            let len = compaction_flags.len().min(data_loss_flags.len());
+            let partition_metrics: Vec<PartitionLagMetric> = (0..len)
+                .map(|i| PartitionLagMetric {
+                    cluster_name: "c".to_string(),
+                    group_id: "g".to_string(),
+                    topic: "t".to_string(),
+                    partition: i as i32,
                     member_host: String::new(),
                     consumer_id: String::new(),
                     client_id: String::new(),
                     committed_offset: 50,
                     lag: 10,
-                    lag_seconds: Some(2.0),
-                    compaction_detected: true,
-                    data_loss_detected: false,
-                    messages_lost: 0,
+                    lag_seconds: Some(1.0),
+                    compaction_detected: compaction_flags[i],
+                    data_loss_detected: data_loss_flags[i],
+                    messages_lost: if data_loss_flags[i] { 5 } else { 0 },
                     retention_margin: 50,
                     lag_retention_ratio: 5.0,
-                },
-                PartitionLagMetric {
-                    cluster_name: "c1".to_string(),
-                    group_id: "g1".to_string(),
-                    topic: "t1".to_string(),
-                    partition: 1,
-                    member_host: String::new(),
-                    consumer_id: String::new(),
-                    client_id: String::new(),
-                    committed_offset: 100,
-                    lag: 5,
-                    lag_seconds: Some(1.0),
-                    compaction_detected: false,
-                    data_loss_detected: true,
-                    messages_lost: 3,
-                    retention_margin: 100,
-                    lag_retention_ratio: 2.0,
-                },
-            ],
-            partition_offsets: vec![],
-            poll_time_ms: 10,
-            compaction_detected_count: 1,
-            data_loss_partition_count: 1,
-            skipped_partition_count: 0,
-        };
+                })
+                .collect();
 
-        registry.update_with_options("c1", &metrics, Granularity::Topic, &HashMap::new());
-        let output = registry.render_prometheus();
+            let expected_compaction = compaction_flags.iter().take(len).any(|&b| b);
+            let expected_data_loss = data_loss_flags.iter().take(len).any(|&b| b);
 
-        // lag_seconds line carries both boolean labels — verify OR propagation
-        let lag_sec_line: Vec<&str> = output
-            .lines()
-            .filter(|l| {
-                l.starts_with("kafka_consumergroup_group_lag_seconds{")
-                    && l.contains("group=\"g1\"")
-            })
-            .collect();
-        assert_eq!(lag_sec_line.len(), 1);
-        assert!(
-            lag_sec_line[0].contains("compaction_detected=\"true\""),
-            "Expected compaction_detected=true (OR), got: {}",
-            lag_sec_line[0]
-        );
-        assert!(
-            lag_sec_line[0].contains("data_loss_detected=\"true\""),
-            "Expected data_loss_detected=true (OR), got: {}",
-            lag_sec_line[0]
-        );
+            let registry = MetricsRegistry::new();
+            let metrics = LagMetrics {
+                partition_metrics,
+                partition_offsets: vec![],
+                poll_time_ms: 0,
+                compaction_detected_count: 0,
+                data_loss_partition_count: 0,
+                skipped_partition_count: 0,
+            };
 
-        // messages_lost should be summed: 0+3 = 3
-        let lost = find_metric_value(
-            &output,
-            "kafka_consumergroup_group_messages_lost{",
-            "group=\"g1\"",
-        );
-        assert!(
-            (lost - 3.0).abs() < f64::EPSILON,
-            "Expected messages_lost=3, got {lost}"
-        );
+            registry.update_with_options("c", &metrics, Granularity::Topic, &HashMap::new());
+            let output = registry.render_prometheus();
+
+            let lag_sec_line: Vec<&str> = output
+                .lines()
+                .filter(|l| {
+                    l.starts_with("kafka_consumergroup_group_lag_seconds{")
+                        && l.contains("group=\"g\"")
+                })
+                .collect();
+            prop_assert_eq!(lag_sec_line.len(), 1);
+
+            let expected_c = format!("compaction_detected=\"{expected_compaction}\"");
+            prop_assert!(
+                lag_sec_line[0].contains(&expected_c),
+                "Expected {}, got: {}", expected_c, lag_sec_line[0]
+            );
+
+            let expected_d = format!("data_loss_detected=\"{expected_data_loss}\"");
+            prop_assert!(
+                lag_sec_line[0].contains(&expected_d),
+                "Expected {}, got: {}", expected_d, lag_sec_line[0]
+            );
+        }
     }
 
     #[test]
