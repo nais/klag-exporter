@@ -10,6 +10,9 @@ mod metrics;
 #[cfg(test)]
 mod test_strategies;
 
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use crate::cluster::ClusterManager;
 use crate::config::Config;
 use crate::export::prometheus::PrometheusExporter;

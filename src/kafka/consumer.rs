@@ -79,7 +79,10 @@ impl TimestampConsumer {
             .set("auto.offset.reset", "earliest")
             // Small fetch size for timestamp sampling
             .set("fetch.max.bytes", "1048576")
-            .set("max.partition.fetch.bytes", "262144");
+            .set("max.partition.fetch.bytes", "262144")
+            // Disable periodic metadata refresh — these consumers only need
+            // metadata for the single partition they are assigned to fetch.
+            .set("topic.metadata.refresh.interval.ms", "-1");
 
         for (key, value) in &self.config.consumer_properties {
             client_config.set(key, value);

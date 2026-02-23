@@ -45,6 +45,7 @@ kube = { version = "0.99", features = ["client", "runtime", "rustls-tls"], optio
 k8s-openapi = { version = "0.24", features = ["v1_32"], optional = true }
 kube-lease-manager = { version = "0.8", optional = true }
 tokio-util = { version = "0.7", features = ["rt"] }
+tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"] }
 proptest = "1"
 
 [features]

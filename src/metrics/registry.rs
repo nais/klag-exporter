@@ -272,8 +272,14 @@ impl MetricsRegistry {
 
     /// Begin a new collection cycle for a cluster.
     /// Clears existing metric points so that `push_points` can append incrementally.
+    /// Reuses the previous cycle's point count as a capacity hint to reduce reallocations.
     pub fn begin_cycle(&self, cluster: &str) {
-        self.metrics.insert(cluster.to_string(), Vec::new());
+        let capacity = self
+            .metrics
+            .get(cluster)
+            .map_or(0, |prev| prev.value().len());
+        self.metrics
+            .insert(cluster.to_string(), Vec::with_capacity(capacity));
     }
 
     /// Append metric points for a cluster during a collection cycle.

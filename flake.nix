@@ -31,10 +31,12 @@
         commonArgs = {
           inherit src;
           strictDeps = true;
+          JEMALLOC_OVERRIDE = "${pkgs.jemalloc}/lib/libjemalloc.a";
           buildInputs = [
             pkgs.openssl
             pkgs.cyrus_sasl
             pkgs.curlFull
+            pkgs.jemalloc
           ];
           nativeBuildInputs = [
             pkgs.cmake
@@ -60,6 +62,7 @@
       in
       {
         devShells.default = pkgs.mkShell {
+          JEMALLOC_OVERRIDE = "${pkgs.jemalloc}/lib/libjemalloc.a";
           packages = with pkgs; [
             rust-analyzer
             cargo-watch
