@@ -4,7 +4,7 @@ use crate::kafka::client::TopicPartition;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{instrument, trace};
+use tracing::{debug, instrument, trace};
 
 #[derive(Debug, Clone)]
 struct CachedTimestamp {
@@ -144,6 +144,25 @@ impl TimestampSampler {
 
     pub fn cache_size(&self) -> usize {
         self.inner.cache.len()
+    }
+
+    /// Wait until all in-flight timestamp fetches have completed.
+    /// This ensures no `BaseConsumer` is in use when the pool is dropped.
+    pub async fn wait_for_inflight(&self) {
+        let mut waited = false;
+        while self.inner.consumer.inflight_count() > 0 {
+            if !waited {
+                debug!(
+                    inflight = self.inner.consumer.inflight_count(),
+                    "Waiting for in-flight timestamp fetches to complete"
+                );
+                waited = true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if waited {
+            debug!("All in-flight timestamp fetches completed");
+        }
     }
 }
 

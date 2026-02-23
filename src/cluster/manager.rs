@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, broadcast};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, trace, warn};
 
 /// Default timeout for a single collection cycle (should be less than `poll_interval`)
@@ -36,6 +37,7 @@ pub struct ClusterManager {
     collection_timeout: Duration,
     compacted_topics_cache: Mutex<Option<(HashSet<String>, Instant)>>,
     compacted_topics_cache_ttl: Duration,
+    cancel_token: CancellationToken,
 }
 
 impl ClusterManager {
@@ -117,6 +119,7 @@ impl ClusterManager {
             collection_timeout,
             compacted_topics_cache: Mutex::new(None),
             compacted_topics_cache_ttl: performance.compacted_topics_cache_ttl,
+            cancel_token: CancellationToken::new(),
         })
     }
 
@@ -137,6 +140,13 @@ impl ClusterManager {
         self.registry.set_healthy(true);
         loop {
             tokio::select! {
+                biased;
+
+                _ = shutdown.recv() => {
+                    info!("Received shutdown signal");
+                    self.cancel_token.cancel();
+                    break;
+                }
                 _ = interval.tick() => {
                     // Check leadership status before collecting
                     let is_leader = leadership.is_leader();
@@ -158,53 +168,6 @@ impl ClusterManager {
                         debug!("Standby mode - skipping collection");
                         continue;
                     }
-
-                    // Wrap collect_once with a timeout to prevent hangs
-                    let collection_result = tokio::time::timeout(
-                        self.collection_timeout,
-                        self.collect_once()
-                    ).await;
-
-                    match collection_result {
-                        Ok(Ok(())) => {
-                            consecutive_errors = 0;
-                            current_backoff = Duration::from_secs(1);
-                            self.registry.set_healthy(true);
-                        }
-                        Ok(Err(e)) => {
-                            consecutive_errors += 1;
-                            error!(
-                                error = %e,
-                                consecutive_errors = consecutive_errors,
-                                "Collection failed"
-                            );
-
-                            if consecutive_errors >= 3 {
-                                self.registry.set_healthy(false);
-
-                                let backoff = current_backoff.min(self.max_backoff);
-                                warn!(
-                                    backoff_secs = backoff.as_secs(),
-                                    "Applying backoff due to consecutive errors"
-                                );
-
-                                tokio::time::sleep(backoff).await;
-                                current_backoff = (current_backoff * 2).min(self.max_backoff);
-                            }
-                        }
-                        Err(_timeout) => {
-                            consecutive_errors += 1;
-                            error!(
-                                timeout_secs = self.collection_timeout.as_secs(),
-                                consecutive_errors = consecutive_errors,
-                                "Collection timed out"
-                            );
-
-                            if consecutive_errors >= 3 {
-                                self.registry.set_healthy(false);
-                            }
-                        }
-                    }
                 }
                 _ = cache_cleanup_interval.tick() => {
                     // Periodic cache cleanup (only if leader, to save resources)
@@ -222,12 +185,61 @@ impl ClusterManager {
                             );
                         }
                     }
-                }
-                _ = shutdown.recv() => {
-                    info!("Received shutdown signal");
-                    break;
+                    continue;
                 }
             }
+
+            // Run collection outside select! so it cannot be cancelled by shutdown
+            let collection_result = tokio::time::timeout(
+                self.collection_timeout,
+                self.collect_once()
+            ).await;
+
+            match collection_result {
+                Ok(Ok(())) => {
+                    consecutive_errors = 0;
+                    current_backoff = Duration::from_secs(1);
+                    self.registry.set_healthy(true);
+                }
+                Ok(Err(e)) => {
+                    consecutive_errors += 1;
+                    error!(
+                        error = %e,
+                        consecutive_errors = consecutive_errors,
+                        "Collection failed"
+                    );
+
+                    if consecutive_errors >= 3 {
+                        self.registry.set_healthy(false);
+
+                        let backoff = current_backoff.min(self.max_backoff);
+                        warn!(
+                            backoff_secs = backoff.as_secs(),
+                            "Applying backoff due to consecutive errors"
+                        );
+
+                        tokio::time::sleep(backoff).await;
+                        current_backoff = (current_backoff * 2).min(self.max_backoff);
+                    }
+                }
+                Err(_timeout) => {
+                    consecutive_errors += 1;
+                    error!(
+                        timeout_secs = self.collection_timeout.as_secs(),
+                        consecutive_errors = consecutive_errors,
+                        "Collection timed out"
+                    );
+
+                    if consecutive_errors >= 3 {
+                        self.registry.set_healthy(false);
+                    }
+                }
+            }
+        }
+
+        // Wait for any in-flight timestamp fetches to complete before dropping consumers
+        if let Some(ref sampler) = self.timestamp_sampler {
+            sampler.wait_for_inflight().await;
         }
 
         // Cleanup
@@ -389,6 +401,7 @@ impl ClusterManager {
         let watermarks = Arc::new(watermarks);
         let timestamp_sampler = self.timestamp_sampler.clone();
         let max_concurrent_fetches = self.max_concurrent_fetches;
+        let cancel_token = self.cancel_token.clone();
         let all_group_offsets = Arc::new(all_group_offsets);
 
         let mut total_compaction_detected: u64 = 0;
@@ -402,6 +415,7 @@ impl ClusterManager {
                 let compacted_topics = Arc::clone(&compacted_topics);
                 let watermarks = Arc::clone(&watermarks);
                 let timestamp_sampler = timestamp_sampler.clone();
+                let cancel_token = cancel_token.clone();
                 let all_group_offsets = Arc::clone(&all_group_offsets);
 
                 async move {
@@ -431,7 +445,7 @@ impl ClusterManager {
                     };
 
                     let timestamps = if let Some(ref sampler) = timestamp_sampler {
-                        fetch_group_timestamps(sampler, &group, &watermarks, max_concurrent_fetches)
+                        fetch_group_timestamps(sampler, &group, &watermarks, max_concurrent_fetches, &cancel_token)
                             .await
                     } else {
                         HashMap::new()
@@ -578,6 +592,7 @@ async fn fetch_group_timestamps(
     group: &GroupSnapshot,
     watermarks: &HashMap<TopicPartition, (i64, i64)>,
     max_concurrent: usize,
+    cancel_token: &CancellationToken,
 ) -> HashMap<(String, TopicPartition), TimestampData> {
     let requests: Vec<(TopicPartition, i64)> = group
         .offsets
@@ -603,12 +618,20 @@ async fn fetch_group_timestamps(
     let group_id = group.group_id.clone();
 
     let mut timestamps = HashMap::new();
+    let cancel = cancel_token.clone();
     let mut stream = futures::stream::iter(requests)
         .map(|(tp, offset)| {
             let sampler = sampler.clone();
             let group_id = group_id.clone();
+            let cancel = cancel.clone();
             async move {
+                if cancel.is_cancelled() {
+                    return Ok((group_id, tp, Ok(None)));
+                }
                 tokio::task::spawn_blocking(move || {
+                    if cancel.is_cancelled() {
+                        return (group_id, tp, Ok(None));
+                    }
                     let ts = sampler.get_timestamp(&group_id, &tp, offset);
                     (group_id, tp, ts)
                 })

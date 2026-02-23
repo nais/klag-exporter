@@ -5,7 +5,7 @@ use rdkafka::Offset;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 use tracing::{debug, instrument, trace, warn};
@@ -26,6 +26,7 @@ pub struct TimestampConsumer {
     consumer_counter: AtomicU64,
     pool: Mutex<Vec<BaseConsumer>>,
     pool_size: usize,
+    inflight: AtomicUsize,
 }
 
 impl TimestampConsumer {
@@ -37,6 +38,7 @@ impl TimestampConsumer {
             consumer_counter: AtomicU64::new(0),
             pool: Mutex::new(Vec::with_capacity(pool_size)),
             pool_size,
+            inflight: AtomicUsize::new(0),
         };
 
         // Pre-populate the pool
@@ -89,6 +91,7 @@ impl TimestampConsumer {
     /// Take a consumer from the pool, or create a new one if the pool is empty.
     /// If `self.pool` is exhausted (more concurrent fetches than `pool_size`); create a temporary one
     fn acquire(&self) -> Result<BaseConsumer> {
+        self.inflight.fetch_add(1, Ordering::SeqCst);
         self.pool
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -103,6 +106,7 @@ impl TimestampConsumer {
         if let Err(e) = consumer.assign(&empty) {
             warn!(error = %e, "Failed to unassign consumer before returning to pool");
             // Don't return a broken consumer to the pool
+            self.inflight.fetch_sub(1, Ordering::SeqCst);
             return;
         }
 
@@ -111,6 +115,8 @@ impl TimestampConsumer {
             pool.push(consumer);
         }
         // else: pool is full, consumer is dropped
+        drop(pool);
+        self.inflight.fetch_sub(1, Ordering::SeqCst);
     }
 
     #[instrument(skip(self), fields(cluster = %self.cluster_name, topic = %tp.topic, partition = tp.partition, offset = offset))]
@@ -190,6 +196,10 @@ impl TimestampConsumer {
                 }
             },
         )
+    }
+
+    pub fn inflight_count(&self) -> usize {
+        self.inflight.load(Ordering::SeqCst)
     }
 }
 
