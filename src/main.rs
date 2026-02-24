@@ -28,56 +28,6 @@ use tracing::warn;
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-/// Install a signal handler that prints a native backtrace on SIGSEGV
-/// before re-raising so the crash site is visible in pod logs.
-///
-/// Uses raw `libc::write(fd=2)` instead of tracing macros because:
-/// - Signal handlers cannot acquire Rust locks (tracing-subscriber's JSON
-///   layer holds `Stderr`'s lock during writes)
-/// - Signal handlers cannot allocate (`tracing::error!` allocates via `String`)
-///
-/// The leading `\n` ensures we start on a fresh line even if tracing-subscriber
-/// was mid-write of a JSON log line when the signal arrived.
-///
-/// Uses `sigaction` (not `signal`) because librdkafka's `rd_kafka_new()` can
-/// override handlers installed via `signal()`. Must be called *after*
-/// rdkafka clients are created.
-#[cfg(unix)]
-fn install_sigsegv_handler() {
-    unsafe {
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = sigsegv_handler as libc::sighandler_t;
-        sa.sa_flags = libc::SA_RESETHAND; // auto-reset to default after firing
-        libc::sigemptyset(&raw mut sa.sa_mask);
-        libc::sigaction(libc::SIGSEGV, &raw const sa, std::ptr::null_mut());
-    }
-}
-
-#[cfg(unix)]
-unsafe extern "C" fn sigsegv_handler(sig: libc::c_int) {
-    // JSON line matching tracing-subscriber's schema so log aggregators can parse it.
-    // The leading \n breaks away from any partially-written JSON line.
-    const JSON_MSG: &[u8] = b"\n{\"level\":\"FATAL\",\"fields\":{\"message\":\"Received SIGSEGV (segmentation fault) - native backtrace follows\"},\"target\":\"klag_exporter\"}\n";
-    unsafe {
-        libc::write(2, JSON_MSG.as_ptr().cast(), JSON_MSG.len());
-
-        // Best-effort backtrace — backtrace()/backtrace_symbols_fd() are not
-        // strictly async-signal-safe but are widely used in crash handlers.
-        // Output is plain text (one frame per line) which log aggregators will
-        // capture as individual non-JSON lines visible in `kubectl logs`.
-        let mut buffer: [*mut libc::c_void; 128] = [std::ptr::null_mut(); 128];
-        let depth = libc::backtrace(buffer.as_mut_ptr(), 128);
-        libc::backtrace_symbols_fd(buffer.as_ptr(), depth, 2);
-
-        // SA_RESETHAND already restored the default handler; just re-raise
-        libc::raise(sig);
-    }
-}
-
-/// No-op on non-Unix platforms (Windows) — SIGSEGV is a Unix signal concept.
-#[cfg(not(unix))]
-fn install_sigsegv_handler() {}
-
 #[derive(Parser, Debug)]
 #[command(name = "klag-exporter")]
 #[command(about = "Kafka consumer group lag exporter with offset and time lag metrics")]
@@ -130,37 +80,28 @@ async fn main() -> anyhow::Result<()> {
         info!("Running in single-instance mode (leader election disabled)");
     }
 
-    // Create cluster managers synchronously so all rd_kafka_new() calls complete
-    // before we install the SIGSEGV handler (librdkafka can override signal handlers).
-    let mut managers = Vec::new();
-    for cluster_config in &config.clusters {
-        let registry = Arc::clone(&registry);
-        let exporter_config = &config.exporter;
-
-        match ClusterManager::new(cluster_config, registry, exporter_config) {
-            Ok(m) => managers.push(m),
-            Err(e) => {
-                error!(
-                    cluster = cluster_config.name,
-                    error = %e,
-                    "Failed to create cluster manager"
-                );
-            }
-        }
-    }
-
-    // Install SIGSEGV handler now that all librdkafka clients are created.
-    install_sigsegv_handler();
-    info!("SIGSEGV handler installed");
-
-    // Spawn cluster manager run loops
+    // Spawn cluster managers
     let mut handles = Vec::new();
-    for manager in managers {
+    for cluster_config in config.clusters {
+        let registry = Arc::clone(&registry);
         let shutdown_rx = shutdown_tx.subscribe();
+        let exporter_config = config.exporter.clone();
         let leadership = leadership_status.clone();
 
         let handle = tokio::spawn(async move {
-            manager.run(shutdown_rx, leadership).await;
+            match ClusterManager::new(&cluster_config, registry, &exporter_config) {
+                Ok(m) => m,
+                Err(e) => {
+                    error!(
+                        cluster = cluster_config.name,
+                        error = %e,
+                        "Failed to create cluster manager"
+                    );
+                    return;
+                }
+            }
+            .run(shutdown_rx, leadership)
+            .await;
         });
 
         handles.push(handle);

@@ -1247,7 +1247,6 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "kube-lease-manager",
- "libc",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
