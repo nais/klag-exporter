@@ -253,7 +253,7 @@ impl ClusterManager {
 
         // 1. List and filter consumer groups
         let step = Instant::now();
-        let all_groups = self.client.list_consumer_groups()?;
+        let all_groups = self.client.list_consumer_groups().await?;
         let list_ms = step.elapsed().as_millis();
         debug!(total_groups = all_groups.len(), "Listed consumer groups");
 

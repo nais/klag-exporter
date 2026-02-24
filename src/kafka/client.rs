@@ -91,11 +91,12 @@ impl KafkaClient {
     }
 
     #[instrument(skip(self), fields(cluster = %self.config.name))]
-    pub fn list_consumer_groups(&self) -> Result<Vec<ConsumerGroupInfo>> {
-        let group_list: GroupList = self
-            .consumer
-            .fetch_group_list(None, self.timeout)
-            .map_err(KlagError::Kafka)?;
+    pub async fn list_consumer_groups(&self) -> Result<Vec<ConsumerGroupInfo>> {
+        let group_list: GroupList = tokio::task::block_in_place(|| {
+            self.consumer
+                .fetch_group_list(None, self.timeout)
+                .map_err(KlagError::Kafka)
+        })?;
 
         let groups = group_list
             .groups()
@@ -232,10 +233,12 @@ impl KafkaClient {
     }
 
     #[instrument(skip(self), fields(cluster = %self.config.name))]
-    pub fn fetch_metadata(&self) -> Result<Metadata> {
-        self.consumer
-            .fetch_metadata(None, self.timeout)
-            .map_err(KlagError::Kafka)
+    pub async fn fetch_metadata(&self) -> Result<Metadata> {
+        tokio::task::block_in_place(|| {
+            self.consumer
+                .fetch_metadata(None, self.timeout)
+                .map_err(KlagError::Kafka)
+        })
     }
 
     /// Fetch watermarks for only the specified partitions.
@@ -407,7 +410,7 @@ impl KafkaClient {
     pub async fn fetch_compacted_topics(&self) -> Result<HashSet<String>> {
         const BATCH_SIZE: usize = 500;
 
-        let metadata = self.fetch_metadata()?;
+        let metadata = self.fetch_metadata().await?;
         let topic_names: Vec<String> = metadata
             .topics()
             .iter()
