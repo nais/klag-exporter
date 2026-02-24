@@ -169,7 +169,7 @@ const fn default_max_concurrent_groups() -> usize {
 }
 
 const fn default_describe_groups_batch_size() -> usize {
-    500
+    100
 }
 
 const fn default_compacted_topics_cache_ttl() -> Duration {
@@ -505,7 +505,7 @@ bootstrap_servers = "localhost:9092"
             Duration::from_secs(30)
         );
         assert_eq!(config.exporter.performance.max_concurrent_groups, 10);
-        assert_eq!(config.exporter.performance.describe_groups_batch_size, 500);
+        assert_eq!(config.exporter.performance.describe_groups_batch_size, 100);
         assert_eq!(
             config.exporter.performance.compacted_topics_cache_ttl,
             Duration::from_secs(300)

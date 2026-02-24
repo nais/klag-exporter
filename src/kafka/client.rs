@@ -115,8 +115,13 @@ impl KafkaClient {
         group_ids: &[&str],
     ) -> Result<Vec<GroupDescription>> {
         let batch_size = self.performance.describe_groups_batch_size;
+        const MAX_CONCURRENT_BATCHES: usize = 5;
 
-        let chunk_futs: Vec<_> = group_ids
+        let mut descriptions = Vec::with_capacity(group_ids.len());
+
+        // Limit concurrent admin ops to avoid overwhelming librdkafka's
+        // internal broker threads (which can SIGSEGV under heavy concurrent load).
+        let mut remaining = group_ids
             .chunks(batch_size)
             .map(|chunk| {
                 let opts = self.admin_options();
@@ -128,50 +133,57 @@ impl KafkaClient {
                         .await
                         .map_err(KlagError::Kafka)
                 }
-            })
-            .collect();
+            });
+        loop {
+            let round: Vec<_> = remaining.by_ref().take(MAX_CONCURRENT_BATCHES).collect();
+            if round.is_empty() {
+                break;
+            }
+            let batch_results = futures::future::try_join_all(round).await?;
 
-        let batch_results = futures::future::try_join_all(chunk_futs).await?;
+            for results in batch_results {
+                for result in results {
+                    match result {
+                        Ok(desc) => {
+                            let members = desc
+                                .members
+                                .into_iter()
+                                .map(|m| {
+                                    let assignments = m
+                                        .assignment
+                                        .map(|a| {
+                                            a.partitions
+                                                .elements()
+                                                .iter()
+                                                .map(|e| {
+                                                    TopicPartition::new(e.topic(), e.partition())
+                                                })
+                                                .collect()
+                                        })
+                                        .unwrap_or_default();
 
-        let mut descriptions = Vec::with_capacity(group_ids.len());
-        for results in batch_results {
-            for result in results {
-                match result {
-                    Ok(desc) => {
-                        let members = desc
-                            .members
-                            .into_iter()
-                            .map(|m| {
-                                let assignments = m
-                                    .assignment
-                                    .map(|a| {
-                                        a.partitions
-                                            .elements()
-                                            .iter()
-                                            .map(|e| TopicPartition::new(e.topic(), e.partition()))
-                                            .collect()
-                                    })
-                                    .unwrap_or_default();
+                                    GroupMemberInfo {
+                                        member_id: m.consumer_id,
+                                        client_id: m.client_id,
+                                        client_host: m.host,
+                                        assignments,
+                                    }
+                                })
+                                .collect();
 
-                                GroupMemberInfo {
-                                    member_id: m.consumer_id,
-                                    client_id: m.client_id,
-                                    client_host: m.host,
-                                    assignments,
-                                }
-                            })
-                            .collect();
-
-                        descriptions.push(GroupDescription {
-                            group_id: desc.group_id,
-                            members,
-                        });
-                    }
-                    Err((group_id, err)) => {
-                        warn!(group = %group_id, error = %err, "Failed to describe consumer group");
+                            descriptions.push(GroupDescription {
+                                group_id: desc.group_id,
+                                members,
+                            });
+                        }
+                        Err((group_id, err)) => {
+                            warn!(group = %group_id, error = %err, "Failed to describe consumer group");
+                        }
                     }
                 }
             }
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
         Ok(descriptions)
