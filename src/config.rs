@@ -161,7 +161,7 @@ const fn default_max_concurrent_fetches() -> usize {
 }
 
 const fn default_kafka_timeout() -> Duration {
-    Duration::from_secs(30)
+    Duration::from_secs(15)
 }
 
 const fn default_max_concurrent_groups() -> usize {
@@ -502,7 +502,7 @@ bootstrap_servers = "localhost:9092"
         assert!(!config.exporter.otel.enabled);
         assert_eq!(
             config.exporter.performance.kafka_timeout,
-            Duration::from_secs(30)
+            Duration::from_secs(15)
         );
         assert_eq!(config.exporter.performance.max_concurrent_groups, 10);
         assert_eq!(config.exporter.performance.describe_groups_batch_size, 100);

@@ -115,7 +115,7 @@ impl KafkaClient {
         group_ids: &[&str],
     ) -> Result<Vec<GroupDescription>> {
         let batch_size = self.performance.describe_groups_batch_size;
-        const MAX_CONCURRENT_BATCHES: usize = 5;
+        const MAX_CONCURRENT_BATCHES: usize = 4;
 
         let mut descriptions = Vec::with_capacity(group_ids.len());
 
@@ -183,7 +183,7 @@ impl KafkaClient {
                 }
             }
 
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
         Ok(descriptions)
